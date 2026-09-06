@@ -74,6 +74,14 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+window.addEventListener("error", function (e) {
+  var el = document.getElementById("dash");
+  if (el && el.className === "loading") {
+    el.className = "fatal";
+    el.innerHTML = "Something broke before the page could load: " + e.message;
+  }
+});
+
 (function () {
   // ---- fill these in from Supabase → Settings → API ----
   var SUPABASE_URL = "https://jvtrzgjehyonyswcznaa.supabase.co";
@@ -83,9 +91,15 @@
   var BTC_N = 40, BTC_BUFFER = 0.0;
   var SPY_N = 200, SPY_BUFFER = 0.03, VOL_N = 20, VOL_GATE = 0.22;
 
-  var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   var root = document.getElementById("dash");
   var data = null;
+  var sb = null;
+  try {
+    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  } catch (e) {
+    root.className = "fatal";
+    root.innerHTML = "Couldn't set up the Supabase client: " + e.message + ". This usually means the supabase-js library didn't load — check your internet connection and reload.";
+  }
 
   function fmt(n, d) { d = d === undefined ? 0 : d; return Number(n).toLocaleString(undefined, {minimumFractionDigits:d, maximumFractionDigits:d}); }
 
@@ -253,6 +267,7 @@
   }
 
   async function init() {
+    if (!sb) return; // already showed the client-setup error above
     if (SUPABASE_URL.indexOf("YOUR_PROJECT_URL") === 0) {
       root.className = "fatal";
       root.innerHTML = "Add your Supabase project URL and anon key near the top of this file before opening it.";
