@@ -76,7 +76,7 @@
 <script>
 (function () {
   // ---- fill these in from Supabase → Settings → API ----
-  var SUPABASE_URL = "https://supabase.com/dashboard/project/jvtrzgjehyonyswcznaa/";
+  var SUPABASE_URL = "https://jvtrzgjehyonyswcznaa.supabase.co";
   var SUPABASE_ANON_KEY = "sb_publishable_Zrzj8DAHnw6PlOzZfVHYaw_NaRUHvQZ";
   // --------------------------------------------------------
 
@@ -253,7 +253,7 @@
   }
 
   async function init() {
-    if (SUPABASE_URL.indexOf("https://supabase.com/dashboard/project/jvtrzgjehyonyswcznaa/") === 0) {
+    if (SUPABASE_URL.indexOf(SUPABASE_URL) === 0) {
       root.className = "fatal";
       root.innerHTML = "Add your Supabase project URL and anon key near the top of this file before opening it.";
       return;
