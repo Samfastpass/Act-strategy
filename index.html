@@ -253,7 +253,7 @@
   }
 
   async function init() {
-    if (SUPABASE_URL.indexOf(SUPABASE_URL) === 0) {
+    if (SUPABASE_URL.indexOf("YOUR_PROJECT_URL") === 0) {
       root.className = "fatal";
       root.innerHTML = "Add your Supabase project URL and anon key near the top of this file before opening it.";
       return;
