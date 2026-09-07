@@ -1,0 +1,30 @@
+[
+  {
+    "id": "btc-sma40",
+    "name": "Bitcoin",
+    "active": true,
+    "liveAsset": "BTC",
+    "backtestAsset": "BTC",
+    "smaLen": 40,
+    "buffer": 0,
+    "volLen": null,
+    "volGate": null,
+    "annualization": 365,
+    "leverage": { "base": 1, "gated": null },
+    "meterRange": { "min": -6, "max": 22 }
+  },
+  {
+    "id": "spy-sma200-volgate",
+    "name": "S&P 500",
+    "active": true,
+    "liveAsset": "SPY",
+    "backtestAsset": "SPX_MERGED",
+    "smaLen": 200,
+    "buffer": 0.03,
+    "volLen": 20,
+    "volGate": 0.22,
+    "annualization": 252,
+    "leverage": { "base": 5, "gated": 3 },
+    "meterRange": { "min": -6, "max": 14 }
+  }
+]

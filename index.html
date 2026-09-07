@@ -26,9 +26,12 @@
   * { box-sizing: border-box; }
   body { font-family: var(--sans); color: var(--ink); background: var(--paper); margin: 0; padding: 1.5rem 1.25rem 3rem; }
   .wrap { max-width: 760px; margin: 0 auto; }
-  .masthead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 8px; }
+  .masthead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 8px; }
   .masthead h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
   .masthead .asof { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); }
+  .tabnav { display: flex; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+  .tabnav .tab { background: none; border: none; padding: 8px 4px; margin-right: 20px; font-size: 13px; font-weight: 600; font-family: inherit; color: var(--ink-faint); cursor: pointer; border-bottom: 2px solid transparent; }
+  .tabnav .tab.active { color: var(--ink); border-bottom-color: var(--ink); }
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 20px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
   .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -38,6 +41,7 @@
   .badge.long { color: var(--long); background: var(--long-bg); }
   .badge.flat { color: var(--flat); background: var(--flat-bg); }
   .statrow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .statrow.cagr-row { grid-template-columns: repeat(4, 1fr); }
   .stat { border-left: 2px solid var(--line); padding-left: 10px; }
   .stat .k { font-size: 11px; color: var(--ink-soft); margin-bottom: 3px; }
   .stat .v { font-family: var(--mono); font-size: 18px; font-weight: 600; }
@@ -54,8 +58,8 @@
   .panel h2 { font-size: 13px; font-weight: 600; margin: 0 0 12px; }
   .formrow { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end; }
   .field label { display: block; font-size: 11px; color: var(--ink-soft); margin-bottom: 5px; }
-  .field input { width: 100%; height: 34px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 13px; padding: 0 9px; }
-  .field input:focus { outline: 2px solid var(--long); outline-offset: -1px; }
+  .field input, .field select { width: 100%; height: 34px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 13px; padding: 0 9px; }
+  .field input:focus, .field select:focus { outline: 2px solid var(--long); outline-offset: -1px; }
   button.add { height: 34px; padding: 0 16px; border-radius: 6px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 600; cursor: pointer; }
   button.add:active { transform: scale(0.98); }
   .errtext { font-size: 12px; color: var(--warn); margin-top: 8px; }
@@ -67,228 +71,33 @@
   .toolsrow { font-size: 11px; color: var(--ink-faint); font-style: italic; margin-top: 10px; }
   .loading, .fatal { font-size: 13px; color: var(--ink-faint); padding: 2rem 0; text-align: center; }
   .fatal { color: var(--warn); }
+  .dropzone { border: 1px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; font-size: 13px; color: var(--ink-soft); cursor: pointer; margin-top: 4px; }
+  .dropzone:hover, .dropzone:focus { border-color: var(--ink-faint); outline: none; }
 </style>
 </head>
 <body>
-<div class="wrap"><div id="dash" class="loading">Loading&hellip;</div></div>
+<div class="wrap">
+  <div class="masthead"><h1>Strategy tracker</h1><span class="asof" id="asof"></span></div>
+  <div id="status" class="loading">Loading&hellip;</div>
+  <nav class="tabnav" id="tabnav" style="display:none;">
+    <button class="tab active" data-tab="home">Home</button>
+    <button class="tab" data-tab="developed">Developed strategies</button>
+    <button class="tab" data-tab="explorer">Strategy explorer</button>
+  </nav>
+  <div id="tab-home"></div>
+  <div id="tab-developed" style="display:none;"></div>
+  <div id="tab-explorer" style="display:none;"></div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script>
-window.addEventListener("error", function (e) {
-  var el = document.getElementById("dash");
-  if (el && el.className === "loading") {
-    el.className = "fatal";
-    el.innerHTML = "Something broke before the page could load: " + e.message;
-  }
-});
-
-(function () {
-  // ---- fill these in from Supabase → Settings → API ----
-  var SUPABASE_URL = "https://jvtrzgjehyonyswcznaa.supabase.co";
-  var SUPABASE_ANON_KEY = "sb_publishable_Zrzj8DAHnw6PlOzZfVHYaw_NaRUHvQZ";
-  // --------------------------------------------------------
-
-  var BTC_N = 40, BTC_BUFFER = 0.0;
-  var SPY_N = 200, SPY_BUFFER = 0.03, VOL_N = 20, VOL_GATE = 0.22;
-
-  var root = document.getElementById("dash");
-  var data = null;
-  var sb = null;
-  try {
-    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  } catch (e) {
-    root.className = "fatal";
-    root.innerHTML = "Couldn't set up the Supabase client: " + e.message + ". This usually means the supabase-js library didn't load — check your internet connection and reload.";
-  }
-
-  function fmt(n, d) { d = d === undefined ? 0 : d; return Number(n).toLocaleString(undefined, {minimumFractionDigits:d, maximumFractionDigits:d}); }
-
-  async function loadData() {
-    var btcRes = await sb.from("prices").select("date,close").eq("asset","BTC").order("date",{ascending:true});
-    var spyRes = await sb.from("prices").select("date,close").eq("asset","SPY").order("date",{ascending:true});
-    if (btcRes.error) throw new Error(btcRes.error.message);
-    if (spyRes.error) throw new Error(spyRes.error.message);
-    return {
-      btc: btcRes.data.map(function(r){return {date:r.date, close:Number(r.close)};}),
-      spy: spyRes.data.map(function(r){return {date:r.date, close:Number(r.close)};})
-    };
-  }
-
-  function computeBTC(prices) {
-    var win = prices.slice(-BTC_N);
-    var sma = win.reduce(function(a,p){return a+p.close;},0) / win.length;
-    var cur = prices[prices.length-1].close;
-    var ext = (cur/sma - 1) * 100;
-    var inPos = cur > sma * (1 + BTC_BUFFER);
-    var cushion = inPos ? (1 - sma/cur) * 100 : (sma*(1-BTC_BUFFER)/cur - 1) * -100;
-    return {sma: sma, cur: cur, ext: ext, inPos: inPos, cushion: cushion};
-  }
-
-  function computeSPY(prices) {
-    var n = prices.length;
-    var closes = prices.map(function(p){return p.close;});
-
-    var sma = new Array(n).fill(null);
-    var sum = 0;
-    for (var i=0; i<n; i++) {
-      sum += closes[i];
-      if (i >= SPY_N) sum -= closes[i-SPY_N];
-      if (i >= SPY_N-1) sma[i] = sum / SPY_N;
-    }
-
-    var logret = new Array(n).fill(0);
-    for (var i=1; i<n; i++) logret[i] = Math.log(closes[i]/closes[i-1]);
-    var vol = new Array(n).fill(null);
-    for (var i=VOL_N; i<n; i++) {
-      var mean=0;
-      for (var k=i-VOL_N+1;k<=i;k++) mean += logret[k];
-      mean /= VOL_N;
-      var vv=0;
-      for (var k2=i-VOL_N+1;k2<=i;k2++) vv += (logret[k2]-mean)*(logret[k2]-mean);
-      vv /= (VOL_N-1);
-      vol[i] = Math.sqrt(vv) * Math.sqrt(252);
-    }
-
-    var state = 0;
-    for (var i=SPY_N-1; i<n; i++) {
-      if (sma[i] === null) continue;
-      var upper = sma[i]*(1+SPY_BUFFER), lower = sma[i]*(1-SPY_BUFFER);
-      var v = vol[i];
-      if (state === 0) {
-        if (closes[i] > upper && v !== null && v < VOL_GATE) state = 5;
-      } else {
-        if (closes[i] < lower) state = 0;
-        else if (state === 5 && v !== null && v >= VOL_GATE) state = 3;
-      }
-    }
-
-    var cur = closes[n-1], curSma = sma[n-1], curVol = vol[n-1];
-    var ext = (cur/curSma - 1) * 100;
-    var upper = curSma*(1+SPY_BUFFER), lower = curSma*(1-SPY_BUFFER);
-    var cushion = state > 0 ? (1 - lower/cur) * 100 : (upper/cur - 1) * 100;
-    return {sma:curSma, cur:cur, ext:ext, vol: curVol!==null ? curVol*100 : null, state:state, cushion:cushion};
-  }
-
-  function render() {
-    var btc = computeBTC(data.btc);
-    var spy = computeSPY(data.spy);
-    var lastDate = data.btc[data.btc.length-1].date;
-
-    var btcMeterMax=22, btcMeterMin=-6;
-    var btcZeroPct = (0-btcMeterMin)/(btcMeterMax-btcMeterMin)*100;
-    var btcFillPct = Math.max(0,Math.min(100,(btc.ext-btcMeterMin)/(btcMeterMax-btcMeterMin)*100));
-
-    var spyMeterMax=14, spyMeterMin=-6;
-    var spyZeroPct = (0-spyMeterMin)/(spyMeterMax-spyMeterMin)*100;
-    var spyFillPct = Math.max(0,Math.min(100,(spy.ext-spyMeterMin)/(spyMeterMax-spyMeterMin)*100));
-
-    var volMax=26;
-    var volFillPct = Math.max(0,Math.min(100,(spy.vol||0)/volMax*100));
-    var volGatePct = (VOL_GATE*100)/volMax*100;
-
-    var histRows = data.btc.slice().reverse().slice(0,12).map(function(b){
-      var s = data.spy.filter(function(p){return p.date===b.date;})[0];
-      return "<tr><td>"+b.date+"</td><td>"+fmt(b.close,0)+"</td><td>"+(s?fmt(s.close,2):"&mdash;")+"</td></tr>";
-    }).join("");
-
-    root.className = "";
-    root.innerHTML =
-      '<div class="masthead"><h1>Strategy tracker</h1><span class="asof">as of ' + lastDate + ' close</span></div>' +
-      '<div class="grid2">' +
-        '<div class="card">' +
-          '<div class="card-head"><div><div class="name">Bitcoin</div><div class="sub">40d SMA &middot; 0% buffer</div></div>' +
-          '<span class="badge ' + (btc.inPos?'long':'flat') + '">' + (btc.inPos?'In / long':'Out / cash') + '</span></div>' +
-          '<div class="statrow">' +
-            '<div class="stat"><div class="k">Price</div><div class="v">$' + fmt(btc.cur,0) + '</div></div>' +
-            '<div class="stat"><div class="k">40d SMA</div><div class="v">$' + fmt(btc.sma,0) + '</div></div>' +
-          '</div>' +
-          '<div class="meter-label"><span>Extension vs SMA</span><span class="num">' + (btc.ext>=0?'+':'') + fmt(btc.ext,1) + '%</span></div>' +
-          '<div class="meter"><div class="zero" style="left:'+btcZeroPct+'%"></div><div class="fill" style="left:'+Math.min(btcZeroPct,btcFillPct)+'%; width:'+Math.abs(btcFillPct-btcZeroPct)+'%;"></div><div class="mark" style="left:'+btcFillPct+'%"></div></div>' +
-          '<div class="footline"><span class="k">Move to flip</span><span class="v">' + fmt(Math.abs(btc.cushion),1) + '%</span></div>' +
-        '</div>' +
-        '<div class="card">' +
-          '<div class="card-head"><div><div class="name">S&amp;P 500</div><div class="sub">via SPY &middot; 200d SMA &middot; 3% buffer &middot; vol gate</div></div>' +
-          '<span class="badge ' + (spy.state>0?'long':'flat') + '">' + (spy.state===5?'In / long, 5x':spy.state===3?'In / long, 3x':'Out / cash') + '</span></div>' +
-          '<div class="statrow">' +
-            '<div class="stat"><div class="k">Price (SPY)</div><div class="v">$' + fmt(spy.cur,2) + '</div></div>' +
-            '<div class="stat"><div class="k">200d SMA</div><div class="v">$' + fmt(spy.sma,2) + '</div></div>' +
-          '</div>' +
-          '<div class="meter-label"><span>Extension vs SMA</span><span class="num">' + (spy.ext>=0?'+':'') + fmt(spy.ext,1) + '%</span></div>' +
-          '<div class="meter"><div class="zero" style="left:'+spyZeroPct+'%"></div><div class="fill" style="left:'+Math.min(spyZeroPct,spyFillPct)+'%; width:'+Math.abs(spyFillPct-spyZeroPct)+'%;"></div><div class="mark" style="left:'+spyFillPct+'%"></div></div>' +
-          '<div class="meter-label"><span>20d realized vol vs 22% gate</span><span class="num">' + (spy.vol!==null?fmt(spy.vol,1)+'%':'&mdash;') + '</span></div>' +
-          '<div class="meter"><div class="fill" style="left:0%; width:'+volFillPct+'%;"></div><div class="mark" style="left:'+volGatePct+'%; background:var(--warn);"></div></div>' +
-          '<div class="footline"><span class="k">Move to flip</span><span class="v">' + fmt(Math.abs(spy.cushion),1) + '%</span></div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="panel"><h2>Log today&#8217;s close</h2>' +
-        '<div class="formrow">' +
-          '<div class="field"><label>Date</label><input type="date" id="in-date"></div>' +
-          '<div class="field"><label>BTC close (USD)</label><input type="number" step="0.01" id="in-btc" placeholder="' + fmt(btc.cur,0) + '"></div>' +
-          '<div class="field"><label>SPY close (USD)</label><input type="number" step="0.01" id="in-spy" placeholder="' + fmt(spy.cur,2) + '"></div>' +
-          '<button class="add" id="btn-add">Add entry</button>' +
-        '</div>' +
-        '<div id="err" class="errtext" style="display:none;"></div>' +
-      '</div>' +
-      '<div class="panel"><h2>History</h2>' +
-        '<div class="histwrap"><table class="hist"><thead><tr><th>Date</th><th>BTC</th><th>SPY</th></tr></thead><tbody>' + histRows + '</tbody></table></div>' +
-        '<div class="toolsrow">' + data.btc.length + ' BTC days &middot; ' + data.spy.length + ' SPY days on record, both computed fresh from full history each load</div>' +
-      '</div>';
-
-    var dateInput = document.getElementById("in-date");
-    var today = new Date(); dateInput.value = today.toISOString().slice(0,10);
-    document.getElementById("btn-add").onclick = onAdd;
-  }
-
-  async function onAdd() {
-    var err = document.getElementById("err");
-    err.style.display = "none";
-    var date = document.getElementById("in-date").value;
-    var btcVal = parseFloat(document.getElementById("in-btc").value);
-    var spyVal = parseFloat(document.getElementById("in-spy").value);
-    if (!date) { err.textContent = "Pick a date first."; err.style.display = "block"; return; }
-    if (isNaN(btcVal) && isNaN(spyVal)) { err.textContent = "Enter at least one price."; err.style.display = "block"; return; }
-
-    var rows = [];
-    if (!isNaN(btcVal)) rows.push({asset:"BTC", date:date, close:btcVal});
-    if (!isNaN(spyVal)) rows.push({asset:"SPY", date:date, close:spyVal});
-
-    var btn = document.getElementById("btn-add");
-    btn.disabled = true; btn.textContent = "Saving…";
-    try {
-      var r = await sb.from("prices").upsert(rows, {onConflict:"asset,date"});
-      if (r.error) throw new Error(r.error.message);
-      data = await loadData();
-      render();
-    } catch (e) {
-      err.textContent = "Couldn't save: " + e.message;
-      err.style.display = "block";
-      btn.disabled = false; btn.textContent = "Add entry";
-    }
-  }
-
-  async function init() {
-    if (!sb) return; // already showed the client-setup error above
-    if (SUPABASE_URL.indexOf("YOUR_PROJECT_URL") === 0) {
-      root.className = "fatal";
-      root.innerHTML = "Add your Supabase project URL and anon key near the top of this file before opening it.";
-      return;
-    }
-    try {
-      data = await loadData();
-      if (data.btc.length === 0 || data.spy.length === 0) {
-        root.className = "fatal";
-        root.innerHTML = "Connected, but the prices table looks empty for BTC or SPY — check the CSV import landed.";
-        return;
-      }
-      render();
-    } catch (e) {
-      root.className = "fatal";
-      root.innerHTML = "Couldn't load data from Supabase: " + e.message;
-    }
-  }
-
-  init();
-})();
-</script>
+<script src="js/supabase-client.js"></script>
+<script src="js/strategy-engine.js"></script>
+<script src="js/merge-series.js"></script>
+<script src="js/render-helpers.js"></script>
+<script src="js/import-tools.js"></script>
+<script src="js/home.js"></script>
+<script src="js/developed.js"></script>
+<script src="js/explorer.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>

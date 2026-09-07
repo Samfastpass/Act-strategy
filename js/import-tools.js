@@ -1,0 +1,237 @@
+// Data import tooling for the Developed Strategies tab:
+//   1. A "Refresh from Twelve Data" button that pulls missing recent days
+//      for BTC/SPY from the Twelve Data API.
+//   2. A CSV drag-and-drop for bulk/backfill imports.
+// Both funnel through importRows(), which upserts into Supabase `prices`
+// and then keeps SPX_MERGED in sync via MergeSeries.
+//
+// The Twelve Data API key is NOT stored in any committed file. It's typed
+// into a field here and kept only in this browser's localStorage — it's a
+// metered, personal-account key (unlike the Supabase anon key), so it must
+// never end up in the public repo.
+window.ImportTools = (function () {
+  var fmt = window.App.fmt;
+  var LS_KEY = "strategy_tracker_twelvedata_key";
+  var TWELVEDATA_SYMBOLS = { BTC: "BTC/USD", SPY: "SPY" };
+
+  function getSavedApiKey() {
+    try { return localStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; }
+  }
+  function saveApiKey(key) {
+    try {
+      if (key) localStorage.setItem(LS_KEY, key);
+      else localStorage.removeItem(LS_KEY);
+    } catch (e) { /* localStorage unavailable — key just won't persist */ }
+  }
+
+  function addDaysUTC(dateStr, n) {
+    var d = new Date(dateStr + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  function todayUTC() { return new Date().toISOString().slice(0, 10); }
+
+  async function fetchTwelveData(symbol, startDate, endDate, apiKey) {
+    var url = "https://api.twelvedata.com/time_series"
+      + "?symbol=" + encodeURIComponent(symbol)
+      + "&interval=1day&order=ASC&format=JSON"
+      + "&start_date=" + startDate + "&end_date=" + endDate
+      + "&apikey=" + encodeURIComponent(apiKey);
+    var res = await fetch(url);
+    var json = await res.json();
+    if (json.status === "error") throw new Error(json.message || "Twelve Data error");
+    if (!json.values) return [];
+    return json.values.map(function (v) { return { date: v.datetime.slice(0, 10), close: parseFloat(v.close) }; });
+  }
+
+  function parseCsv(text) {
+    var lines = text.split(/\r\n|\n/).filter(function (l) { return l.trim().length > 0; });
+    if (!lines.length) return [];
+    var header = lines[0].split(",").map(function (h) { return h.trim().toLowerCase(); });
+    var dateIdx = header.indexOf("date");
+    if (dateIdx < 0) dateIdx = header.indexOf("datetime");
+    var closeIdx = header.indexOf("close");
+    if (dateIdx < 0 || closeIdx < 0) {
+      throw new Error("CSV needs a date/datetime column and a close column (found: " + header.join(", ") + ").");
+    }
+    var rows = [];
+    for (var i = 1; i < lines.length; i++) {
+      var cols = lines[i].split(",");
+      var dateVal = (cols[dateIdx] || "").trim();
+      var closeVal = parseFloat(cols[closeIdx]);
+      if (!dateVal || isNaN(closeVal)) continue;
+      rows.push({ date: dateVal.slice(0, 10), close: closeVal });
+    }
+    return rows;
+  }
+
+  async function importRows(ctx, asset, rows) {
+    if (!rows.length) return;
+    var payload = rows.map(function (r) { return { asset: asset, date: r.date, close: r.close }; });
+    var res = await ctx.sb.from("prices").upsert(payload, { onConflict: "asset,date" });
+    if (res.error) throw new Error(asset + ": " + res.error.message);
+
+    var data = ctx.getData();
+    var mergedRows = window.MergeSeries.deriveMergedRows(asset, rows, data.spx, data.spy);
+    if (mergedRows.length) {
+      var res2 = await ctx.sb.from("prices").upsert(mergedRows, { onConflict: "asset,date" });
+      if (res2.error) throw new Error("SPX_MERGED sync: " + res2.error.message);
+    }
+  }
+
+  function panelHTML() {
+    return ''
+      + '<div class="panel">'
+      + '<h2>Refresh from Twelve Data</h2>'
+      + '<div class="formrow" style="grid-template-columns: 2fr auto auto;">'
+      + '<div class="field"><label>API key (kept only in this browser)</label><input type="password" id="td-api-key" placeholder="paste your Twelve Data API key"></div>'
+      + '<button class="add" id="td-clear-key" style="background:var(--card); color:var(--ink); border-color:var(--line);">Clear key</button>'
+      + '<button class="add" id="td-refresh-btn">Refresh</button>'
+      + '</div>'
+      + '<div id="td-status" class="errtext" style="display:none;"></div>'
+      + '<div id="td-preview" style="display:none; margin-top:10px;">'
+      + '<div id="td-preview-body" style="font-size:12px; color:var(--ink-soft);"></div>'
+      + '<button class="add" id="td-confirm-btn" style="margin-top:8px;">Confirm import</button>'
+      + '</div>'
+      + '</div>'
+      + '<div class="panel">'
+      + '<h2>Drop a CSV to import</h2>'
+      + '<div class="formrow" style="grid-template-columns: 1fr auto;">'
+      + '<div class="field"><label>Asset</label><select id="csv-asset-select"><option value="BTC">BTC</option><option value="SPX">SPX</option><option value="SPY">SPY</option></select></div>'
+      + '<div></div>'
+      + '</div>'
+      + '<div class="dropzone" id="csv-dropzone" tabindex="0">Drop a CSV here, or click to choose a file<br><span style="font-size:11px;">expects a date/datetime column and a close column</span></div>'
+      + '<input type="file" id="csv-file-input" accept=".csv" style="display:none;">'
+      + '<div id="csv-status" class="errtext" style="display:none;"></div>'
+      + '<div id="csv-preview" style="display:none; margin-top:10px;">'
+      + '<div id="csv-preview-body" style="font-size:12px; color:var(--ink-soft);"></div>'
+      + '<button class="add" id="csv-confirm-btn" style="margin-top:8px;">Confirm import</button>'
+      + '</div>'
+      + '</div>';
+  }
+
+  function wireUp(container, ctx) {
+    var apiKeyInput = container.querySelector("#td-api-key");
+    var clearKeyBtn = container.querySelector("#td-clear-key");
+    var refreshBtn = container.querySelector("#td-refresh-btn");
+    var tdStatus = container.querySelector("#td-status");
+    var tdPreview = container.querySelector("#td-preview");
+    var tdPreviewBody = container.querySelector("#td-preview-body");
+    var tdConfirmBtn = container.querySelector("#td-confirm-btn");
+
+    apiKeyInput.value = getSavedApiKey();
+    apiKeyInput.addEventListener("change", function () { saveApiKey(apiKeyInput.value.trim()); });
+    clearKeyBtn.addEventListener("click", function () { apiKeyInput.value = ""; saveApiKey(""); });
+
+    function showStatus(el, msg, isError) {
+      el.style.display = "block";
+      el.textContent = msg;
+      el.style.color = isError ? "var(--warn)" : "var(--ink-soft)";
+    }
+    function hideStatus(el) { el.style.display = "none"; }
+
+    var pendingTd = null; // { BTC: rows, SPY: rows }
+
+    refreshBtn.addEventListener("click", async function () {
+      var apiKey = apiKeyInput.value.trim();
+      if (!apiKey) { showStatus(tdStatus, "Add your Twelve Data API key first.", true); return; }
+      hideStatus(tdStatus);
+      tdPreview.style.display = "none";
+      refreshBtn.disabled = true; refreshBtn.textContent = "Fetching…";
+      try {
+        var data = ctx.getData();
+        var end = todayUTC();
+        var results = {};
+        var lines = [];
+        for (var asset in TWELVEDATA_SYMBOLS) {
+          var lastRow = data[window.App.assetKey(asset)].slice(-1)[0];
+          var start = lastRow ? addDaysUTC(lastRow.date, 1) : null;
+          if (!start || start > end) { lines.push(asset + ": already up to date"); continue; }
+          var rows = await fetchTwelveData(TWELVEDATA_SYMBOLS[asset], start, end, apiKey);
+          results[asset] = rows;
+          lines.push(asset + ": " + rows.length + " new day(s)" + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : ""));
+        }
+        pendingTd = results;
+        tdPreviewBody.innerHTML = lines.join("<br>");
+        tdPreview.style.display = "block";
+      } catch (e) {
+        showStatus(tdStatus, "Couldn't fetch: " + e.message, true);
+      } finally {
+        refreshBtn.disabled = false; refreshBtn.textContent = "Refresh";
+      }
+    });
+
+    tdConfirmBtn.addEventListener("click", async function () {
+      if (!pendingTd) return;
+      tdConfirmBtn.disabled = true; tdConfirmBtn.textContent = "Saving…";
+      try {
+        for (var asset in pendingTd) {
+          await importRows(ctx, asset, pendingTd[asset]);
+        }
+        pendingTd = null;
+        tdPreview.style.display = "none";
+        await ctx.onImported();
+      } catch (e) {
+        showStatus(tdStatus, "Couldn't save: " + e.message, true);
+      } finally {
+        tdConfirmBtn.disabled = false; tdConfirmBtn.textContent = "Confirm import";
+      }
+    });
+
+    var assetSelect = container.querySelector("#csv-asset-select");
+    var dropzone = container.querySelector("#csv-dropzone");
+    var fileInput = container.querySelector("#csv-file-input");
+    var csvStatus = container.querySelector("#csv-status");
+    var csvPreview = container.querySelector("#csv-preview");
+    var csvPreviewBody = container.querySelector("#csv-preview-body");
+    var csvConfirmBtn = container.querySelector("#csv-confirm-btn");
+    var pendingCsv = null; // { asset, rows }
+
+    function handleFile(file) {
+      hideStatus(csvStatus);
+      csvPreview.style.display = "none";
+      var reader = new FileReader();
+      reader.onload = function () {
+        try {
+          var rows = parseCsv(String(reader.result));
+          if (!rows.length) throw new Error("No usable rows found.");
+          pendingCsv = { asset: assetSelect.value, rows: rows };
+          csvPreviewBody.textContent = assetSelect.value + ": " + rows.length + " row(s), " + rows[0].date + " to " + rows[rows.length - 1].date;
+          csvPreview.style.display = "block";
+        } catch (e) {
+          showStatus(csvStatus, e.message, true);
+        }
+      };
+      reader.onerror = function () { showStatus(csvStatus, "Couldn't read that file.", true); };
+      reader.readAsText(file);
+    }
+
+    dropzone.addEventListener("click", function () { fileInput.click(); });
+    dropzone.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") fileInput.click(); });
+    fileInput.addEventListener("change", function () { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+    dropzone.addEventListener("dragover", function (e) { e.preventDefault(); dropzone.style.borderColor = "var(--ink)"; });
+    dropzone.addEventListener("dragleave", function () { dropzone.style.borderColor = ""; });
+    dropzone.addEventListener("drop", function (e) {
+      e.preventDefault();
+      dropzone.style.borderColor = "";
+      if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+    });
+
+    csvConfirmBtn.addEventListener("click", async function () {
+      if (!pendingCsv) return;
+      csvConfirmBtn.disabled = true; csvConfirmBtn.textContent = "Saving…";
+      try {
+        await importRows(ctx, pendingCsv.asset, pendingCsv.rows);
+        pendingCsv = null;
+        csvPreview.style.display = "none";
+        await ctx.onImported();
+      } catch (e) {
+        showStatus(csvStatus, "Couldn't save: " + e.message, true);
+      } finally {
+        csvConfirmBtn.disabled = false; csvConfirmBtn.textContent = "Confirm import";
+      }
+    });
+  }
+
+  return { panelHTML: panelHTML, wireUp: wireUp };
+})();
