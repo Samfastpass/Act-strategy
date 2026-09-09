@@ -73,6 +73,48 @@
   .fatal { color: var(--warn); }
   .dropzone { border: 1px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; font-size: 13px; color: var(--ink-soft); cursor: pointer; margin-top: 4px; }
   .dropzone:hover, .dropzone:focus { border-color: var(--ink-faint); outline: none; }
+
+  .badge.shelved { color: var(--ink-faint); background: var(--line); font-weight: 500; margin-left: 4px; }
+  .card-click { cursor: pointer; transition: border-color 0.12s ease; }
+  .card-click:hover, .card-click:focus-visible { border-color: var(--ink-faint); outline: none; }
+  .card-open { border-color: var(--ink); }
+  .expandhint { font-style: normal; color: var(--ink-soft); }
+  .muted { color: var(--ink-faint); font-weight: 400; }
+  .tradehint { font-size: 12px; color: var(--ink-soft); border-top: 1px solid var(--line); padding-top: 8px; margin-top: -1px; }
+  .tradehint.due { color: var(--warn); font-weight: 600; }
+
+  .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .detail-head h2 { margin: 0; }
+  .winbtns { display: flex; gap: 4px; }
+  .winbtn { font-family: var(--mono); font-size: 11px; padding: 4px 9px; border-radius: 5px; border: 1px solid var(--line); background: var(--paper); color: var(--ink-soft); cursor: pointer; }
+  .winbtn:hover { border-color: var(--ink-faint); }
+  .winbtn.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+  .chart-wrap { width: 100%; overflow-x: auto; }
+  .chart { width: 100%; height: auto; display: block; }
+  .ch-grid { stroke: var(--line); stroke-width: 1; }
+  .ch-axis { fill: var(--ink-faint); font-family: var(--mono); font-size: 9px; }
+  .ch-hold { fill: none; stroke: var(--ink-faint); stroke-width: 1.2; }
+  .ch-strat { fill: none; stroke: var(--long); stroke-width: 1.6; }
+  .ch-strip-bg { fill: var(--line); opacity: 0.35; }
+  .ch-expo { fill: var(--long); opacity: 0.75; }
+  .ch-legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 11px; color: var(--ink-soft); margin-top: 6px; }
+  .ch-legend b { font-family: var(--mono); color: var(--ink); }
+  .ch-legend i { display: inline-block; width: 10px; height: 2px; margin-right: 5px; vertical-align: middle; }
+  .ch-legend .sw-strat { background: var(--long); }
+  .ch-legend .sw-hold { background: var(--ink-faint); }
+  .ch-note { color: var(--ink-faint); font-style: italic; }
+
+  /* Four CAGR figures don't fit across a phone-width card — wrap to 2x2. */
+  @media (max-width: 460px) {
+    .statrow.cagr-row { grid-template-columns: repeat(2, 1fr); }
+    .detail-head { align-items: flex-start; }
+  }
+
+  .oddswrap { overflow-x: auto; }
+  table.odds { min-width: 560px; }
+  table.odds tr.cur td { background: var(--long-bg); }
+  table.odds tr.thin td { color: var(--ink-faint); }
 </style>
 </head>
 <body>
@@ -93,6 +135,8 @@
 <script src="js/supabase-client.js"></script>
 <script src="js/strategy-engine.js"></script>
 <script src="js/merge-series.js"></script>
+<script src="js/odds.js"></script>
+<script src="js/chart.js"></script>
 <script src="js/render-helpers.js"></script>
 <script src="js/import-tools.js"></script>
 <script src="js/home.js"></script>
