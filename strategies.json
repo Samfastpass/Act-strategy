@@ -1,17 +1,24 @@
 [
   {
-    "id": "btc-sma40",
+    "id": "btc-sma120-voltarget",
     "name": "Bitcoin",
     "active": true,
     "liveAsset": "BTC",
     "backtestAsset": "BTC",
-    "smaLen": 40,
+    "smaLen": 120,
     "buffer": 0,
-    "volLen": null,
+    "volLen": 20,
     "volGate": null,
     "annualization": 365,
+    "sizing": {
+      "mode": "volTarget",
+      "volTarget": 0.6,
+      "maxSize": 1.0,
+      "rebalanceBand": 0.15
+    },
     "leverage": { "base": 1, "gated": null },
-    "meterRange": { "min": -6, "max": 22 }
+    "meterRange": { "min": -6, "max": 22 },
+    "execution": "Signal from BTC 24/7 close; execute next LSE session. WXBT (WisdomTree Physical Bitcoin ETP, 0.15% TER) on Trading 212 Invest."
   },
   {
     "id": "spy-sma200-volgate",
@@ -26,5 +33,20 @@
     "annualization": 252,
     "leverage": { "base": 5, "gated": 3 },
     "meterRange": { "min": -6, "max": 14 }
+  },
+  {
+    "id": "btc-sma40",
+    "name": "Bitcoin (40d)",
+    "active": false,
+    "archived": true,
+    "liveAsset": "BTC",
+    "backtestAsset": "BTC",
+    "smaLen": 40,
+    "buffer": 0,
+    "volLen": null,
+    "volGate": null,
+    "annualization": 365,
+    "leverage": { "base": 1, "gated": null },
+    "meterRange": { "min": -6, "max": 22 }
   }
 ]

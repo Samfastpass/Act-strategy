@@ -38,10 +38,12 @@ def realized_vol(closes, n, annualization=252):
 
 def run_backtest(dates, closes, sma_n, buffer,
                   vol_n=None, vol_gate=None, leverage_high=1.0, leverage_low=1.0,
-                  annualization=252):
+                  annualization=252,
+                  size_mode="fixed", vol_target=None, max_size=1.0,
+                  rebalance_band=0.0):
     """
-    Run the SMA + buffer trend filter, with an optional volatility-gated
-    leverage overlay, over a full price series.
+    Run the SMA + buffer trend filter, with an optional volatility overlay
+    that either gates leverage or sets position size, over a full price series.
 
     Signal (always present):
         upper = SMA * (1 + buffer); lower = SMA * (1 - buffer)
@@ -49,15 +51,26 @@ def run_backtest(dates, closes, sma_n, buffer,
         IN  -> OUT when close crosses below lower
         (buffer=0 collapses this to a pure crossover with no hysteresis)
 
-    Leverage overlay (only if vol_gate is not None):
-        On entry: leverage_high if realized vol < vol_gate, else leverage_low.
+    size_mode="fixed" — leverage overlay (only if vol_gate is not None):
+        On entry: leverage_high if realized vol < vol_gate, else stay out.
         While invested: if vol rises to >= vol_gate, latch down to
         leverage_low. This is a ONE-WAY ratchet — it does not latch back up
         to leverage_high until the position exits and re-enters fresh.
         Exit is price-only (crossing below `lower`), regardless of vol.
 
+    size_mode="vol_target" — continuous volatility targeting:
+        While the signal is IN, the target position is
+        min(vol_target / realized_vol, max_size); it is 0 while OUT.
+        A trade only happens when |held - target| > rebalance_band, so the
+        held size persists through small drifts (a no-trade band). This is
+        path-dependent: `held` carries forward day to day.
+
     Returns a dict:
-        state       : array, leverage multiplier each day (0 = out)
+        state       : array, exposure each day — a leverage multiplier under
+                      "fixed", a fraction of capital (1.0 = 100%) under
+                      "vol_target". 0 = out in both.
+        target      : array, the pre-band target size ("vol_target" only;
+                      equals state under "fixed")
         strat_ret   : array, daily strategy returns (state[t-1] applied to
                       day t's return — no lookahead)
         equity      : array, cumulative equity curve starting at 1.0
@@ -72,31 +85,45 @@ def run_backtest(dates, closes, sma_n, buffer,
     daily_ret[1:] = closes[1:] / closes[:-1] - 1
 
     sma = compute_sma(closes, sma_n)
-    vol = realized_vol(closes, vol_n, annualization) if vol_gate is not None else None
+    needs_vol = vol_n is not None and (vol_gate is not None or size_mode == "vol_target")
+    vol = realized_vol(closes, vol_n, annualization) if needs_vol else None
 
     start_idx = sma_n - 1
-    if vol_gate is not None:
+    if needs_vol:
         start_idx = max(start_idx, vol_n)
 
     state = np.zeros(n_obs)
+    target = np.zeros(n_obs)
     pos = 0.0
     for i in range(start_idx, n_obs):
         upper = sma[i] * (1 + buffer)
         lower = sma[i] * (1 - buffer)
         v = vol[i] if vol is not None else None
 
-        if pos == 0:
+        if size_mode == "vol_target":
             if closes[i] > upper:
-                if vol_gate is None:
-                    pos = leverage_high
-                elif v is not None and v < vol_gate:
-                    pos = leverage_high
-                # if vol_gate set but v >= vol_gate at the crossing: stay out
+                want = min(vol_target / v, max_size) if (v is not None and v > 0) else 0.0
+            elif closes[i] < lower:
+                want = 0.0
+            else:
+                want = pos  # inside the band (or exactly at the SMA): hold
+            target[i] = want
+            if abs(pos - want) > rebalance_band:
+                pos = want
         else:
-            if closes[i] < lower:
-                pos = 0.0
-            elif vol_gate is not None and pos == leverage_high and v is not None and v >= vol_gate:
-                pos = leverage_low
+            if pos == 0:
+                if closes[i] > upper:
+                    if vol_gate is None:
+                        pos = leverage_high
+                    elif v is not None and v < vol_gate:
+                        pos = leverage_high
+                    # if vol_gate set but v >= vol_gate at the crossing: stay out
+            else:
+                if closes[i] < lower:
+                    pos = 0.0
+                elif vol_gate is not None and pos == leverage_high and v is not None and v >= vol_gate:
+                    pos = leverage_low
+            target[i] = pos
         state[i] = pos
 
     strat_ret = np.zeros(n_obs)
@@ -134,7 +161,7 @@ def run_backtest(dates, closes, sma_n, buffer,
         n_trades=n_trades,
     )
 
-    return dict(state=state, strat_ret=strat_ret, equity=equity,
+    return dict(state=state, target=target, strat_ret=strat_ret, equity=equity,
                 sma=sma, vol=vol, stats=stats, start_idx=start_idx)
 
 
@@ -210,10 +237,106 @@ def conditional_forward_return(dates, closes, sma_n, buffer, extension_threshold
     return pd.DataFrame(rows)
 
 
+def conditional_odds(dates, closes, sma_n, buffer, bands=(0, 5, 10, 15, 20),
+                      now_tolerance=1.0, **backtest_kwargs):
+    """
+    "What usually happens from here": bucket historical days by how far price
+    sat from the SMA, and report the distribution of outcomes between that day
+    and the next flip.
+
+    Only days matching the CURRENT regime (in-position vs. flat) are pooled,
+    since "+10% while invested" and "+10% while in cash" are different
+    questions. The final episode is dropped — it hasn't flipped yet, so its
+    outcome is unknown and including it would bias results downward.
+
+    For in-position days the result is the strategy's own compounded return to
+    the exit; for flat days it is the underlying asset's move while sitting
+    out (the strategy itself earns 0% flat).
+
+    Note on sample size: consecutive days inside one episode share an exit, so
+    they are NOT independent observations. `episodes` is the honest measure of
+    how much evidence backs a row; `n_days` will always look far larger.
+
+    Returns a DataFrame with one row per band plus a "Now" row covering
+    today's extension +/- `now_tolerance` percentage points.
+    """
+    closes = np.asarray(closes, dtype=float)
+    n_obs = len(closes)
+    res = run_backtest(dates, closes, sma_n, buffer, **backtest_kwargs)
+    state, sma, start_idx = res["state"], res["sma"], res["start_idx"]
+    extension = (closes / sma - 1) * 100
+
+    # Contiguous runs of in/flat, minus the still-open final episode.
+    episodes, i = [], start_idx
+    while i < n_obs:
+        in_pos = state[i] > 0
+        s = i
+        while i < n_obs and (state[i] > 0) == in_pos:
+            i += 1
+        episodes.append((s, i - 1, in_pos))
+    episodes = episodes[:-1]
+
+    rows = []
+    for ep_idx, (s, e, in_pos) in enumerate(episodes):
+        exit_k = min(e + 1, n_obs - 1)
+        for t in range(s, e + 1):
+            if np.isnan(sma[t]):
+                continue
+            if in_pos:
+                growth = 1.0
+                for k in range(t + 1, exit_k + 1):
+                    prev = state[k - 1]
+                    growth *= (1 + prev * (closes[k] / closes[k - 1] - 1)) if prev > 0 else 1.0
+                result = (growth - 1) * 100
+            else:
+                result = (closes[exit_k] / closes[t] - 1) * 100
+            rows.append(dict(
+                episode=ep_idx, ext=extension[t], in_pos=in_pos, result=result,
+                days=(pd.Timestamp(dates[exit_k]) - pd.Timestamp(dates[t])).days,
+            ))
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    current_in = state[-1] > 0
+    current_ext = extension[-1]
+    pool = df[df["in_pos"] == current_in]
+
+    def summarize(label, subset):
+        if subset.empty:
+            return dict(band=label, n_days=0, episodes=0)
+        return dict(
+            band=label, n_days=len(subset), episodes=subset["episode"].nunique(),
+            pct_up=(subset["result"] > 0).mean() * 100,
+            worst=subset["result"].min(), typical=subset["result"].median(),
+            best=subset["result"].max(),
+            days_min=subset["days"].min(), days_typical=subset["days"].median(),
+            days_max=subset["days"].max(),
+        )
+
+    out = [summarize(f"Now ({current_ext:+.1f}% +/-{now_tolerance})",
+                     pool[(pool["ext"] - current_ext).abs() <= now_tolerance])]
+    sign = 1 if current_in else -1
+    for j, lo in enumerate(bands):
+        hi = bands[j + 1] if j + 1 < len(bands) else None
+        signed = pool["ext"] * sign
+        sel = pool[(signed >= lo) & ((signed < hi) if hi is not None else True)]
+        out.append(summarize(f"{lo}-{hi}%" if hi else f"{lo}%+", sel))
+    return pd.DataFrame(out)
+
+
 # ---------------------------------------------------------------------------
 # Validated parameter sets used in this project's live tracker and analysis.
 # Pass closes/dates from the `prices` table (Supabase), filtered by asset.
 # ---------------------------------------------------------------------------
+# Shelved 2026-09-09, kept for reference/comparison — superseded by BTC_V2_PARAMS.
 BTC_PARAMS = dict(sma_n=40, buffer=0.0, annualization=365)
+
+# Live BTC strategy: 120d crossover, sized at 60%/vol capped at 100%, with a
+# 15pp no-trade band (~12 trades/yr over the last decade).
+BTC_V2_PARAMS = dict(sma_n=120, buffer=0.0, annualization=365,
+                      vol_n=20, size_mode="vol_target", vol_target=0.60,
+                      max_size=1.0, rebalance_band=0.15)
+
 SPX_PARAMS = dict(sma_n=200, buffer=0.03, annualization=252,
                    vol_n=20, vol_gate=0.22, leverage_high=5.0, leverage_low=3.0)

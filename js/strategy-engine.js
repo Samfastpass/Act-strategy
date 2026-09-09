@@ -24,6 +24,10 @@ window.StrategyEngine = (function () {
     var volGate = params.volGate;
     var annualization = params.annualization || 252;
     var lev = params.leverage || { base: 1, gated: null };
+    var sizing = params.sizing || { mode: "fixedLeverage" };
+    // Vol feeds either the gate (fixedLeverage) or the position size
+    // (volTarget), so it's needed whenever volLen is set and something uses it.
+    var needsVol = !!volLen && (volGate != null || sizing.mode === "volTarget");
 
     var sma = new Array(n).fill(null);
     var sum = 0;
@@ -34,7 +38,7 @@ window.StrategyEngine = (function () {
     }
 
     var vol = new Array(n).fill(null);
-    if (volLen && volGate != null) {
+    if (needsVol) {
       var logret = new Array(n).fill(0);
       for (var i2 = 1; i2 < n; i2++) logret[i2] = Math.log(closes[i2] / closes[i2 - 1]);
       for (var i3 = volLen; i3 < n; i3++) {
@@ -48,27 +52,44 @@ window.StrategyEngine = (function () {
       }
     }
 
-    // Matches strategy_lib.py's start_idx: with a vol gate, the walk can't
-    // start until both the SMA *and* the vol window are available.
-    var startIdx = volGate != null ? Math.max(smaLen - 1, volLen) : smaLen - 1;
+    // Matches strategy_lib.py's start_idx: when vol is in play, the walk
+    // can't start until both the SMA *and* the vol window are available.
+    var startIdx = needsVol ? Math.max(smaLen - 1, volLen) : smaLen - 1;
 
+    // state[i] is exposure at day i's close: 0 = flat, otherwise the
+    // leverage multiple (fixedLeverage) or the fraction of capital held
+    // (volTarget, where 1.0 = 100%).
     var state = new Array(n).fill(0);
+    var target = new Array(n).fill(0);
     var cur = 0;
     for (var i4 = startIdx; i4 < n; i4++) {
-      if (sma[i4] === null) { state[i4] = cur; continue; }
+      if (sma[i4] === null) { state[i4] = cur; target[i4] = cur; continue; }
       var upper = sma[i4] * (1 + buffer), lower = sma[i4] * (1 - buffer);
       var v = vol[i4];
-      if (cur === 0) {
-        var volOk = volGate == null ? true : (v !== null && v < volGate);
-        if (closes[i4] > upper && volOk) cur = lev.base;
+
+      if (sizing.mode === "volTarget") {
+        // Size continuously as volTarget/vol, capped, and only actually
+        // trade when held size drifts more than rebalanceBand from target.
+        var want;
+        if (closes[i4] > upper) want = (v !== null && v > 0) ? Math.min(sizing.volTarget / v, sizing.maxSize) : 0;
+        else if (closes[i4] < lower) want = 0;
+        else want = cur; // inside the band (or exactly at the SMA): hold
+        target[i4] = want;
+        if (Math.abs(cur - want) > sizing.rebalanceBand) cur = want;
       } else {
-        if (closes[i4] < lower) cur = 0;
-        else if (lev.gated != null && cur === lev.base && volGate != null && v !== null && v >= volGate) cur = lev.gated;
+        if (cur === 0) {
+          var volOk = volGate == null ? true : (v !== null && v < volGate);
+          if (closes[i4] > upper && volOk) cur = lev.base;
+        } else {
+          if (closes[i4] < lower) cur = 0;
+          else if (lev.gated != null && cur === lev.base && volGate != null && v !== null && v >= volGate) cur = lev.gated;
+        }
+        target[i4] = cur;
       }
       state[i4] = cur;
     }
 
-    return { closes: closes, sma: sma, vol: vol, state: state, startIdx: startIdx };
+    return { closes: closes, sma: sma, vol: vol, state: state, target: target, startIdx: startIdx };
   }
 
   // Current status: price/SMA, extension %, in/out + leverage state, and
@@ -77,8 +98,11 @@ window.StrategyEngine = (function () {
     var w = walk(prices, params);
     var n = w.closes.length;
     var buffer = params.buffer || 0;
+    var sizing = params.sizing || { mode: "fixedLeverage" };
     var cur = w.closes[n - 1], curSma = w.sma[n - 1], curVol = w.vol[n - 1];
     var state = w.state[n - 1];
+    var prevState = n >= 2 ? w.state[n - 2] : 0;
+    var target = w.target[n - 1];
     var ext = (cur / curSma - 1) * 100;
     var upper = curSma * (1 + buffer), lower = curSma * (1 - buffer);
     var inPos = state > 0;
@@ -86,15 +110,22 @@ window.StrategyEngine = (function () {
     return {
       sma: curSma, cur: cur, ext: ext,
       vol: curVol !== null ? curVol * 100 : null,
-      state: state, inPos: inPos, cushion: cushion
+      state: state, inPos: inPos, cushion: cushion,
+      // volTarget only: `target` is the size today's vol implies before the
+      // no-trade band is applied; `state` is what you should actually hold
+      // after it. They differ whenever the band suppressed a rebalance.
+      // tradeDue means the latest close moved the held size off yesterday's.
+      target: target,
+      prevState: prevState,
+      tradeDue: sizing.mode === "volTarget" && state !== prevState
     };
   }
 
-  // Equity curve (starting at 1.0 on the first day the SMA is defined),
-  // applying leveraged daily log-returns while in position and staying
-  // flat (cash) otherwise. A day's return is scaled by the leverage state
-  // as of the *previous* day's close (the position you were already
-  // holding going into that day).
+  // Equity curve (starting at 1.0 at startIdx), applying leveraged daily
+  // simple returns while in position and staying flat (cash) otherwise.
+  // A day's return is scaled by the leverage state as of the *previous*
+  // day's close (the position you were already holding going into that
+  // day) — never the state computed using that same day's own close.
   function backtestEquityCurve(prices, params) {
     var w = walk(prices, params);
     var n = w.closes.length;
@@ -142,5 +173,5 @@ window.StrategyEngine = (function () {
     return (Math.pow(last.equity / start.equity, 1 / yearsSpan) - 1) * 100;
   }
 
-  return { computeStatus: computeStatus, backtestEquityCurve: backtestEquityCurve, cagr: cagr };
+  return { walk: walk, computeStatus: computeStatus, backtestEquityCurve: backtestEquityCurve, cagr: cagr };
 })();

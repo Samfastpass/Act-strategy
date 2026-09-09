@@ -45,13 +45,22 @@ Key points not to relitigate:
   responses at 1000 rows server-side regardless of requested range size.
 
 **File layout**: `strategies.json` is the single source of truth for
-strategy parameters (SMA length, buffer, vol gate, leverage, which asset
-each strategy live-tracks vs. backtests against) — both the Home and
-Developed-strategies tabs read from it. `js/strategy-engine.js` is one
-generic state-machine engine (`computeStatus`, `backtestEquityCurve`,
-`cagr`) parameterized by those entries — a strategy with `buffer: 0` and
-no vol gate degenerates to a plain crossover, so BTC and the S&P strategy
-share one code path rather than bespoke functions per asset.
+strategy parameters (SMA length, buffer, vol gate, leverage, sizing mode,
+which asset each strategy live-tracks vs. backtests against) — both the
+Home and Developed-strategies tabs read from it. Home renders only
+`active: true` entries; Developed renders all, marking `archived: true`
+ones as Shelved. `js/strategy-engine.js` is one generic state-machine
+engine (`walk`, `computeStatus`, `backtestEquityCurve`, `cagr`)
+parameterized by those entries, supporting two position-sizing modes:
+the default `fixedLeverage` (discrete leverage, optionally vol-gated with
+a one-way ratchet) and `volTarget` (continuous sizing at
+`volTarget/vol` capped at `maxSize`, with a `rebalanceBand` no-trade
+band). `state[i]` means exposure in both — a leverage multiple under the
+former, a fraction of capital under the latter — so the equity math is
+shared. `js/chart.js` (log-scale SVG equity chart) and `js/odds.js`
+(conditional outcome distributions) power the Developed tab's detail
+panel; see PROJECT_NOTES.md for the statistical caveats baked into the
+odds table.
 `js/merge-series.js` keeps `SPX_MERGED` in sync (regression-converts new
 SPY rows to SPX-equivalent units) whenever `js/import-tools.js` writes new
 SPX/SPY data via the Twelve Data fetch or the CSV drop. `js/app.js` is the

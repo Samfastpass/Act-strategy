@@ -22,16 +22,42 @@ is one generic parameterized engine (`computeStatus`/`backtestEquityCurve`/
 hand-duplicated `computeBTC`/`computeSPY` functions. A new strategy is
 (mostly) just a new entry in `strategies.json`.
 
+## Charts and odds (Developed tab)
+Clicking a strategy card opens a full-width detail panel:
+- **Equity chart** (`js/chart.js`) — hand-rolled SVG, no charting library.
+  Strategy vs. buy & hold, both rebased to 1× at the window start, with
+  selectable 1y/3y/5y/10y/all windows and an exposure strip showing what
+  the strategy was actually holding at the time. The y-axis is **log
+  scale**: BTC equity spans five orders of magnitude and a linear axis
+  renders the first decade as a flat line on the axis.
+- **Odds table** (`js/odds.js`) — conditional distribution of what happened
+  between a given distance-from-SMA and the next flip, bucketed by
+  extension band plus a tight ±1pp "now" row.
+
+Two statistical choices worth not undoing:
+- The **final episode is excluded** — it hasn't flipped yet, so its outcome
+  is unknown; including it would drag every duration and return downward.
+- Rows report **both `days` and `eps`**. Consecutive days within one
+  episode share the same exit, so they are not independent observations —
+  `n=1880 days` can mean as few as a handful of real episodes. Rows backed
+  by fewer than 5 episodes are dimmed rather than hidden.
+
 ## `strategy_lib.py` — ground truth reference
 `strategy_lib.py` is a validated Python reference implementation (not run
 by the site — Python, no build integration) that `js/strategy-engine.js`
 is ported from and must be checked against whenever the two disagree:
-`run_backtest` (core engine), `grid_search` (parameter sweeps),
-`conditional_forward_return` (episode studies), and `BTC_PARAMS`/
-`SPX_PARAMS` (validated settings). It's also the intended foundation for
-the Strategy Explorer tab once that's built (`grid_search` is the sweep
-behind a heatmap; `conditional_forward_return` is the "what happens from
-here" episode study).
+`run_backtest` (core engine, both `size_mode="fixed"` and
+`size_mode="vol_target"`), `grid_search` (parameter sweeps),
+`conditional_forward_return` and `conditional_odds` (episode studies —
+the latter mirrors `js/odds.js`), and `BTC_PARAMS`/`BTC_V2_PARAMS`/
+`SPX_PARAMS`. It's also the intended foundation for the Strategy Explorer
+tab once that's built.
+
+**Caveat**: numpy/pandas aren't installed on the dev machine, so the
+2026-09-09 additions (`vol_target` sizing, `conditional_odds`) are
+syntax-checked and desk-checked against the JS but have not been executed.
+The JS side of both was verified against independent from-scratch
+implementations. Run the Python before trusting it as a tiebreaker.
 
 **One known, deliberate divergence**: `run_backtest`'s `years` for
 CAGR/Sharpe/etc. is `eval_days / 365.25`, where `eval_days` counts array
@@ -47,12 +73,27 @@ rather than porting the row-count version. Worth fixing in
 `strategy_lib.py` too if it's used for real Python-side analysis on
 SPX/SPY data, not just BTC.
 
-## The two strategies
-1. **Bitcoin**: 40-day SMA, 0% buffer. In whenever price > SMA, out
-   whenever price < SMA. No leverage. Because the buffer is 0%, this signal
-   has no path-dependency — it's recomputed fresh from the trailing 40 days
-   every time, never stored as state.
-2. **S&P 500 (tracked via SPY)**: 200-day SMA, 3% buffer (enter above
+## The strategies
+1. **Bitcoin** (live since 2026-09-09): 120-day SMA, 0% buffer, plain
+   crossover — in when close > SMA, out when close < SMA. Position size is
+   *volatility-targeted* rather than fixed: `60% / annualised 20-day
+   realised vol`, capped at 100% of allocated capital, 0% when out. A trade
+   only happens when held size differs from target by more than 15
+   percentage points (a no-trade band), which works out at roughly 12
+   trades/year over the last decade — 13.3/yr measured over 10 years,
+   11.2/yr over 5, though 16.1/yr across all history since BTC's early
+   years were volatile enough to trigger extra resizes.
+   Execution: signal from the BTC 24/7 close, executed next LSE session,
+   via WXBT (WisdomTree Physical Bitcoin ETP, 0.15% TER) on Trading 212
+   Invest.
+   The no-trade band makes this path-dependent — held size carries forward
+   day to day, so it can't be evaluated from a single day's close.
+2. **Bitcoin 40-day** — *shelved 2026-09-09*, superseded by the above.
+   40-day SMA, 0% buffer, no leverage, no sizing overlay. Kept in
+   `strategies.json` with `"active": false, "archived": true` so it still
+   appears on the Developed tab (marked Shelved) for comparison, but no
+   longer shows on Home.
+3. **S&P 500 (tracked via SPY)**: 200-day SMA, 3% buffer (enter above
    SMA+3%, exit below SMA-3%), plus a volatility gate — enters at 5x
    leverage only when 20-day realized (annualized) volatility is under 22%;
    latches down to 3x if vol crosses 22% while already invested (one-way
