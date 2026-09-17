@@ -63,7 +63,16 @@ former, a fraction of capital under the latter — so the equity math is
 shared. `js/chart.js` (log-scale SVG equity chart) and `js/odds.js`
 (conditional outcome distributions) power the Developed tab's detail
 panel; see PROJECT_NOTES.md for the statistical caveats baked into the
-odds table.
+odds table. `js/explorer.js` is the S&P Leverage explorer (SMA × buffer
+heatmap over `SPX_MERGED`) with `js/price-chart.js` for its price/SMA/
+band/in-out detail chart — PROJECT_NOTES.md records its caching,
+per-period compounding and colour decisions, which are load-bearing
+rather than incidental.
+
+Both engines model **ruin**: equity floors at zero when a daily factor
+goes non-positive (a >1/leverage loss closes the fund) and it is
+absorbing. Never remove the floor to "simplify" — without it a
+high-leverage sweep silently produces sign-flipped nonsense.
 `js/merge-series.js` keeps `SPX_MERGED` in sync (regression-converts new
 SPY rows to SPX-equivalent units) whenever `js/import-tools.js` writes new
 SPX/SPY data via the Twelve Data fetch or the CSV drop. `js/app.js` is the

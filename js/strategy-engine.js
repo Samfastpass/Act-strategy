@@ -133,6 +133,7 @@ window.StrategyEngine = (function () {
     if (firstIdx >= n) return [];
     var equity = new Array(n).fill(null);
     equity[firstIdx] = 1;
+    var ruinedAt = null;
     for (var i = firstIdx + 1; i < n; i++) {
       var prevState = w.state[i - 1] || 0;
       // A daily-rebalanced Nx-leveraged position targets N times the
@@ -143,10 +144,22 @@ window.StrategyEngine = (function () {
       // strategy_lib.py's strat_ret = state[t-1] * daily_ret[t].
       var simpleRet = w.closes[i] / w.closes[i - 1] - 1;
       var factor = prevState > 0 ? 1 + prevState * simpleRet : 1;
-      equity[i] = equity[i - 1] * factor;
+      // Ruin: a loss worse than 1/leverage wipes the position out entirely
+      // (at 5x, the -20.5% of 1987-10-19 gives factor -0.02). A fund can't
+      // go negative — it closes. Floor at zero, which is absorbing, so
+      // everything after is 0 too. Without this the curve flips sign and
+      // every subsequent number is meaningless.
+      if (factor <= 0) {
+        if (ruinedAt === null) ruinedAt = prices[i].date;
+        equity[i] = 0;
+      } else {
+        equity[i] = equity[i - 1] * factor;
+      }
     }
     var out = [];
     for (var j = firstIdx; j < n; j++) out.push({ date: prices[j].date, equity: equity[j] });
+    // Carried on the array so existing callers that just index it are unaffected.
+    out.ruinedAt = ruinedAt;
     return out;
   }
 

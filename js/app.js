@@ -69,7 +69,7 @@
     }
     window.Home.render(panels.home, state.data, state.strategies, ctx);
     window.Developed.render(panels.developed, state.data, state.strategies, ctx);
-    window.Explorer.render(panels.explorer);
+    window.Explorer.render(panels.explorer, state.data);
   }
 
   function switchTab(name) {

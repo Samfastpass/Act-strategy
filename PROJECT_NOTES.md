@@ -167,8 +167,51 @@ Four `asset` values currently loaded:
   came out ~35-90% instead of the correct ~24-67%. See
   `backtestEquityCurve` in `js/strategy-engine.js`.
 
+## S&P Leverage explorer tab
+Sweeps the **binary** version of the S&P strategy — in at a fixed leverage,
+out to cash, no vol gate — over a grid of SMA lengths (rows) × symmetric
+buffers (columns), on `SPX_MERGED`. Controls: period · leverage (1/2/3/5x)
+· grid range (broad/zoomed) · colour metric (Calmar default, CAGR
+alternative). Clicking a cell opens `js/price-chart.js`: price, its SMA,
+the buffer band, and in/out drawn as background colour blocks.
+
+**The finding this tab exists to show**: at 5x binary, *17 of 49* combos
+are wiped out by the single −20.5% day of 1987-10-19, and every survivor
+still carries a −98% to −99.9% drawdown. At 3x nothing is wiped out. So
+what makes the live 5x strategy survivable is **the vol gate**, not the
+choice of SMA or buffer — the gate had ratcheted it down before 1987.
+
+Implementation notes worth keeping:
+- The binary strategy is not new logic — it's the engine's `fixedLeverage`
+  mode with `volGate: null`. `StrategyEngine.walk` is reused as-is.
+- The walk is cached per `sma|buffer` **at 1x**, because for a binary
+  strategy the in/out *timing* doesn't depend on leverage; leverage is
+  applied when compounding. One set of walks serves all four leverages.
+- Each period is compounded **fresh from its own start**, so RUINED means
+  wiped out *inside* the selected window. Inheriting the full-history
+  equity level instead would make every post-1987 window unevaluable
+  (0/0) for combos that blew up, defeating the point of a period
+  selector. The in/out state still carries in, so there's no artificial
+  trade on day one. For combos that never blew up the two are identical.
+- Heatmap colour is **blue/red diverging, not the site's usual
+  green/red**: the fill is the primary encoding here and red-green is the
+  worst pairing for the commonest colour blindness. Every ramp step was
+  contrast-checked to keep each cell's printed numbers ≥4.5:1 against
+  `--ink` (dark mode's brightest blue had to be darkened from `#2a78d6`
+  to `#256abf` to clear it). Ruined cells are hatched and sit outside the
+  ramp so they can't stretch the scale.
+
+## Ruin is modelled, in both implementations
+`backtestEquityCurve` (JS) and `run_backtest` (Python) both floor equity at
+zero when a daily factor goes non-positive, and report `ruinedAt` /
+`ruined_at`. Ruin is absorbing — the fund closes, it cannot go negative and
+later recover. This fires for no live strategy (their worst-ever daily
+factor is 0.601), so it changed no existing number; it exists because the
+explorer's high-leverage sweeps hit it constantly.
+
 ## Where this is headed
-The **Strategy explorer** tab exists as a placeholder ("coming soon").
+The gated (5x→3x vol-ratchet) version of the leverage explorer is the next
+addition, to quantify the gate's contribution directly.
 Next planned feature: letting the user define and backtest arbitrary
 parameter combinations (different SMA lengths, buffers, vol thresholds)
 against the full historical data (`SPX`+`SPY`, or `SPX_MERGED` for a
