@@ -54,24 +54,32 @@ the latter mirrors `js/odds.js`), and `BTC_PARAMS`/`BTC_V2_PARAMS`/
 tab once that's built.
 
 **Caveat**: numpy/pandas aren't installed on the dev machine, so the
-2026-09-09 additions (`vol_target` sizing, `conditional_odds`) are
-syntax-checked and desk-checked against the JS but have not been executed.
-The JS side of both was verified against independent from-scratch
-implementations. Run the Python before trusting it as a tiebreaker.
+2026-09-09 additions (`vol_target` sizing, `conditional_odds`) and the
+2026-09-17 `years` fix are syntax-checked and desk-checked against the JS
+but have not been executed. The JS side was verified against independent
+from-scratch implementations. Install numpy/pandas and run the Python
+before trusting it as a tiebreaker.
 
-**One known, deliberate divergence**: `run_backtest`'s `years` for
-CAGR/Sharpe/etc. is `eval_days / 365.25`, where `eval_days` counts array
-rows. That's correct for BTC (continuous daily series, `annualization=365`
-matches) but wrong for SPX/SPY/SPX_MERGED (trading-day series only,
-~252/year) — treating a row count as a calendar-day count understates
-elapsed time by roughly 1.45x, which inflates CAGR. Checked empirically on
-the real SPX_MERGED series: 24,587 eval rows is 67.3 "years" by that
-formula vs. 97.9 actual calendar years. `js/strategy-engine.js`'s `cagr()`
-instead computes elapsed time from the actual `date` values, which is
-correct for both continuous and trading-day series — kept intentionally
-rather than porting the row-count version. Worth fixing in
-`strategy_lib.py` too if it's used for real Python-side analysis on
-SPX/SPY data, not just BTC.
+**Fixed 2026-09-17 — the row-count year bug.** `run_backtest` used to set
+`years = eval_days / 365.25`, where `eval_days` counts array *rows*. Rows
+are observations, not calendar days: an equity series has ~252 per year,
+so that formula called a 97.9-year SPX_MERGED backtest 67.3 years and
+inflated every S&P CAGR by roughly 1.5x:
+
+| window | correct (calendar) | old `rows/365.25` |
+|---|---|---|
+| all-time | 24.3% | 37.2% |
+| 10y | 37.6% | 59.1% |
+| 3y | 62.7% | 103.2% |
+| 1y | 17.8% | 26.8% |
+
+It hid for so long because BTC trades every calendar day, so ~365
+rows/year made the formula accidentally right for the one series anyone
+spot-checked. Both `run_backtest` and `js/strategy-engine.js`'s `cagr()`
+now derive elapsed time from actual `date` values, which is correct for
+continuous and trading-day series alike. Dividing rows by
+`annualization` (252/365) is an acceptable fallback; dividing rows by
+365.25 is never correct. Don't reintroduce it.
 
 ## The strategies
 1. **Bitcoin** (live since 2026-09-09): 120-day SMA, 0% buffer, plain

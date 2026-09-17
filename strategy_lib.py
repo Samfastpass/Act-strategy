@@ -131,7 +131,17 @@ def run_backtest(dates, closes, sma_n, buffer,
 
     eval_ret = strat_ret[start_idx + 1:]
     eval_days = n_obs - (start_idx + 1)
-    years = eval_days / 365.25
+
+    # Elapsed time must come from the actual dates, not the row count.
+    # Rows are *observations*, not calendar days: an equity series has ~252
+    # rows/year, so `eval_days / 365.25` would call a 97.9-year backtest 67.3
+    # years and inflate its CAGR by ~1.5x. (It only looks right for BTC,
+    # which trades every calendar day.) Falls back to rows/annualization if
+    # the dates can't be parsed.
+    try:
+        years = (pd.Timestamp(dates[-1]) - pd.Timestamp(dates[start_idx + 1])).days / 365.25
+    except (TypeError, ValueError):
+        years = eval_days / annualization
 
     equity = np.ones(n_obs)
     equity[start_idx + 1:] = np.cumprod(1 + eval_ret)
