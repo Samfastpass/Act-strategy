@@ -27,10 +27,13 @@ gotcha).
 backtest/CAGR math (not run by the site — pure Python, checked against
 `js/strategy-engine.js` by hand/by test). If `js/strategy-engine.js`'s
 behavior ever disagrees with it, treat `strategy_lib.py` as correct and
-fix the JS — except the one documented divergence in PROJECT_NOTES.md
-(years-for-CAGR uses actual calendar dates in JS, row-count/365.25 in the
-Python file, which is wrong for trading-day series). It's also the
-intended source to port from when building out the Strategy Explorer tab.
+fix the JS. It's also the intended source to port from when building out
+the Strategy Explorer tab.
+
+Both sides now derive CAGR's elapsed time from actual calendar dates.
+Never reintroduce a row-count-based year count — rows are observations,
+not days, and an equity series has ~252 of them per year (see
+PROJECT_NOTES.md).
 
 Key points not to relitigate:
 
