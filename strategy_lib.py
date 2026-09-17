@@ -143,8 +143,21 @@ def run_backtest(dates, closes, sma_n, buffer,
     except (TypeError, ValueError):
         years = eval_days / annualization
 
+    # Ruin: a loss worse than 1/leverage wipes the position out (at 5x, the
+    # -20.5% of 1987-10-19 gives a factor of -0.02). A fund can't go negative —
+    # it closes — so zero the factor from that day on, which makes the cumprod
+    # absorbing at 0. Without this the curve flips sign and everything after is
+    # meaningless. Mirrors backtestEquityCurve in js/strategy-engine.js.
+    factors = 1 + eval_ret
+    wiped = factors <= 0
+    ruined_at = None
+    if wiped.any():
+        first = int(np.argmax(wiped))
+        factors[first:] = 0.0
+        ruined_at = dates[start_idx + 1 + first]
+
     equity = np.ones(n_obs)
-    equity[start_idx + 1:] = np.cumprod(1 + eval_ret)
+    equity[start_idx + 1:] = np.cumprod(factors)
     equity[:start_idx + 1] = 1.0
 
     cum = equity[start_idx + 1:]
@@ -169,10 +182,12 @@ def run_backtest(dates, closes, sma_n, buffer,
         max_dd_pct=max_dd * 100,
         calmar=calmar,
         n_trades=n_trades,
+        ruined_at=ruined_at,
     )
 
     return dict(state=state, target=target, strat_ret=strat_ret, equity=equity,
-                sma=sma, vol=vol, stats=stats, start_idx=start_idx)
+                sma=sma, vol=vol, stats=stats, start_idx=start_idx,
+                ruined_at=ruined_at)
 
 
 def grid_search(dates, closes, sma_values, buffer_values, annualization=252,

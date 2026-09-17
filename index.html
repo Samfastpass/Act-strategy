@@ -115,6 +115,67 @@
   table.odds { min-width: 560px; }
   table.odds tr.cur td { background: var(--long-bg); }
   table.odds tr.thin td { color: var(--ink-faint); }
+
+  /* ---- S&P leverage explorer ---- */
+  /* Diverging heatmap ramp: blue (positive) / red (negative) with a neutral
+     midpoint. Blue-vs-red rather than the site's green/red because the fill IS
+     the encoding here, and red-green is the worst pairing for the commonest
+     colour blindness. Every step is contrast-checked so the numbers printed
+     inside each cell stay >=4.5:1 against --ink. Dark steps are selected for
+     the dark surface, not flipped. */
+  :root {
+    --cell-neg4: #ea8a89; --cell-neg3: #f3b0af; --cell-neg2: #fad9d8; --cell-neg1: #fdecec;
+    --cell-mid:  #f0efec;
+    --cell-pos1: #eaf2fd; --cell-pos2: #cde2fb; --cell-pos3: #9ec5f4; --cell-pos4: #6da7ec;
+    --cell-ruin: #e8e6e1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --cell-neg4: #c03b3b; --cell-neg3: #96302f; --cell-neg2: #5c2020; --cell-neg1: #3a1a1a;
+      --cell-mid:  #383835;
+      --cell-pos1: #16283c; --cell-pos2: #1c3a5c; --cell-pos3: #1c5cab; --cell-pos4: #256abf;
+      --cell-ruin: #2a2723;
+    }
+  }
+  .exp-controls { display: flex; flex-wrap: wrap; gap: 14px 20px; margin-bottom: 12px; }
+  .exp-ctl label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint); margin-bottom: 4px; }
+  .exp-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--ink-soft); margin-bottom: 12px; }
+  .exp-legend .lg-ramp { display: inline-flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+  .exp-legend .lg-ramp i { width: 16px; height: 10px; display: block; }
+  .exp-legend .lg-end { font-family: var(--mono); color: var(--ink); }
+  .exp-legend .lg-note { flex-basis: 100%; color: var(--ink-faint); font-style: italic; }
+
+  .matrixwrap { overflow-x: auto; }
+  table.matrix { border-collapse: separate; border-spacing: 2px; font-size: 12px; min-width: 560px; }
+  table.matrix th { font-weight: 500; color: var(--ink-faint); font-size: 11px; font-family: var(--mono); padding: 4px 6px; text-align: center; }
+  table.matrix th.corner { text-align: left; color: var(--ink-soft); }
+  table.matrix tbody th { text-align: right; }
+  td.mcell { padding: 7px 4px; text-align: center; border-radius: 5px; cursor: pointer; line-height: 1.25; outline: none; }
+  td.mcell .c-main { display: block; font-family: var(--mono); font-weight: 600; font-size: 12px; color: var(--ink); }
+  td.mcell .c-sub { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-soft); }
+  td.mcell:hover, td.mcell:focus-visible { box-shadow: 0 0 0 2px var(--ink-faint); }
+  td.mcell.is-live { box-shadow: inset 0 0 0 2px var(--ink); }
+  td.mcell.is-sel { box-shadow: 0 0 0 2px var(--ink); }
+  .cell-neg4 { background: var(--cell-neg4); } .cell-neg3 { background: var(--cell-neg3); }
+  .cell-neg2 { background: var(--cell-neg2); } .cell-neg1 { background: var(--cell-neg1); }
+  .cell-mid  { background: var(--cell-mid); }
+  .cell-pos1 { background: var(--cell-pos1); } .cell-pos2 { background: var(--cell-pos2); }
+  .cell-pos3 { background: var(--cell-pos3); } .cell-pos4 { background: var(--cell-pos4); }
+  .cell-na   { background: transparent; }
+  .cell-na .c-main { color: var(--ink-faint); }
+  /* Ruined cells sit outside the ramp entirely — hatched so they read as a
+     different kind of thing, not just "a very bad number". */
+  .cell-ruined { background: var(--cell-ruin); background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(156,43,43,0.28) 4px 8px); }
+  .cell-ruined .c-main { color: var(--warn); font-size: 10px; letter-spacing: 0.03em; }
+
+  .pc-in { fill: var(--long); opacity: 0.13; }
+  .pc-band { fill: var(--ink-faint); opacity: 0.16; stroke: none; }
+  .pc-sma { fill: none; stroke: var(--ink-faint); stroke-width: 1.3; }
+  .pc-price { fill: none; stroke: var(--ink); stroke-width: 1.4; }
+  .ch-legend .sw-price { background: var(--ink); }
+  .ch-legend .sw-sma { background: var(--ink-faint); }
+  .ch-legend .sw-band { background: var(--ink-faint); opacity: 0.4; height: 8px; }
+  .ch-legend .sw-inblock { background: var(--long); opacity: 0.35; height: 8px; }
 </style>
 </head>
 <body>
@@ -124,7 +185,7 @@
   <nav class="tabnav" id="tabnav" style="display:none;">
     <button class="tab active" data-tab="home">Home</button>
     <button class="tab" data-tab="developed">Developed strategies</button>
-    <button class="tab" data-tab="explorer">Strategy explorer</button>
+    <button class="tab" data-tab="explorer">S&amp;P Leverage explorer</button>
   </nav>
   <div id="tab-home"></div>
   <div id="tab-developed" style="display:none;"></div>
@@ -137,6 +198,7 @@
 <script src="js/merge-series.js"></script>
 <script src="js/odds.js"></script>
 <script src="js/chart.js"></script>
+<script src="js/price-chart.js"></script>
 <script src="js/render-helpers.js"></script>
 <script src="js/import-tools.js"></script>
 <script src="js/home.js"></script>
