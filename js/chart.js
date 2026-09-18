@@ -9,8 +9,11 @@
 window.Chart = (function () {
   var fmt = window.App.fmt;
 
-  var W = 720, H = 260, PAD_L = 46, PAD_R = 12, PAD_T = 12, PAD_B = 46;
-  var STRIP_H = 22, STRIP_GAP = 8;
+  // PAD_B/STRIP_GAP are sized so the exposure strip's caption clears the
+  // plot's own date labels — at the old spacing they sat 2px apart and
+  // overprinted each other.
+  var W = 720, H = 286, PAD_L = 46, PAD_R = 12, PAD_T = 12, PAD_B = 72;
+  var STRIP_H = 22, STRIP_GAP = 24;
   var PLOT_W = W - PAD_L - PAD_R;
   var PLOT_H = H - PAD_T - PAD_B;
 
@@ -114,6 +117,34 @@ window.Chart = (function () {
     // Exposure strip: one bar per day, height scaled to the window's max
     // exposure so it reads for both 0/3/5x leverage and 0–100% sizing.
     var maxState = series.reduce(function (m, s) { return Math.max(m, s.state); }, 0) || 1;
+
+    // Background blocks behind the curves, coloured by exposure level, with
+    // contiguous runs of equal exposure merged into single rects (the ratchet
+    // and the no-trade band both produce long runs, so this is a handful of
+    // rects rather than one per day).
+    //
+    // Colour alone must not carry the leverage — green vs amber is a hard pair
+    // for red-green colour blindness — so the height strip below stays, and
+    // the legend names each level.
+    var isVolTgt = (strategy.sizing || {}).mode === "volTarget";
+    var gated = strategy.leverage && strategy.leverage.gated;
+    var blocks = "", runStart = null, runVal = 0;
+    function flushRun(endIdx) {
+      if (runStart === null || runVal <= 0) return;
+      var bx0 = x(series[runStart].date), bx1 = x(series[endIdx].date);
+      // Continuous sizing gets one hue at proportional opacity; a discrete
+      // ratchet gets distinct classes per level.
+      var cls = isVolTgt ? "blk-full" : (gated && runVal < strategy.leverage.base ? "blk-reduced" : "blk-full");
+      var op = isVolTgt ? (0.10 + 0.20 * (runVal / maxState)).toFixed(3) : "";
+      blocks += '<rect x="' + bx0.toFixed(1) + '" y="' + PAD_T + '" width="' + Math.max(0.5, bx1 - bx0).toFixed(1)
+        + '" height="' + PLOT_H + '" class="ch-blk ' + cls + '"'
+        + (op ? ' style="opacity:' + op + '"' : '') + '/>';
+    }
+    series.forEach(function (s, i) {
+      if (s.state !== runVal) { flushRun(i - 1 < 0 ? 0 : i - 1); runStart = i; runVal = s.state; }
+      if (i === series.length - 1) flushRun(i);
+    });
+
     var stripY = PAD_T + PLOT_H + STRIP_GAP + 14;
     var barW = Math.max(0.6, PLOT_W / series.length);
     var bars = "";
@@ -133,7 +164,8 @@ window.Chart = (function () {
     return ''
       + '<div class="chart-wrap">'
       + '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" preserveAspectRatio="xMidYMid meet" role="img" '
-      + 'aria-label="' + esc(strategy.name) + ' strategy versus buy and hold, log scale">'
+      + 'aria-label="' + esc(strategy.name) + ' strategy versus buy and hold, log scale, shaded by position size">'
+      + blocks
       + gridlines
       + '<path d="' + path("hold") + '" class="ch-hold"/>'
       + '<path d="' + path("strat") + '" class="ch-strat"/>'
@@ -145,7 +177,13 @@ window.Chart = (function () {
       + '<div class="ch-legend">'
       + '<span><i class="sw-strat"></i>Strategy <b>' + fmt(last.strat, 2) + '×</b></span>'
       + '<span><i class="sw-hold"></i>Buy &amp; hold <b>' + fmt(last.hold, 2) + '×</b></span>'
-      + '<span class="ch-note">rebased to 1× at ' + series[0].date + ' · log scale</span>'
+      + (isVolTgt
+        ? '<span><i class="sw-blk-full"></i>Invested &mdash; deeper shading is a bigger position</span>'
+        : (gated
+          ? '<span><i class="sw-blk-full"></i>In at ' + fmt(strategy.leverage.base, 0) + '×</span>'
+            + '<span><i class="sw-blk-reduced"></i>Ratcheted to ' + fmt(gated, 0) + '×</span>'
+          : '<span><i class="sw-blk-full"></i>In the market</span>'))
+      + '<span class="ch-note">unshaded = out, in cash &middot; rebased to 1× at ' + series[0].date + ' &middot; log scale</span>'
       + '</div>'
       + '</div>';
   }

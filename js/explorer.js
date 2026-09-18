@@ -28,7 +28,10 @@ window.Explorer = (function () {
   var LEVERAGES = [1, 2, 3, 5];
   var LIVE = { sma: 200, buffer: 3 }; // the strategy actually being run
 
-  var state = { periodIdx: 0, leverage: 5, grid: "broad", metric: "calmar", selected: null };
+  var state = {
+    periodIdx: 0, leverage: 5, grid: "broad", metric: "calmar", selected: null,
+    perfMode: "total", annMode: "calendar"
+  };
   var walkCache = {}; // "sma|buffer" -> { state01, sma, startIdx }
 
   function paramsFor(smaLen, bufferPct) {
@@ -258,8 +261,10 @@ window.Explorer = (function () {
       + '</div></div>';
 
     if (state.selected) {
-      html += window.PriceChart.render(prices, state.selected, state.leverage, period,
-        walkFor(prices, state.selected.sma, state.selected.buffer));
+      var selWalk = walkFor(prices, state.selected.sma, state.selected.buffer);
+      html += window.PriceChart.render(prices, state.selected, state.leverage, period, selWalk);
+      html += window.PerfChart.render(prices, state.selected, state.leverage, period, selWalk,
+        state.perfMode, state.annMode);
     }
 
     container.innerHTML = html;
@@ -277,6 +282,8 @@ window.Explorer = (function () {
     bind("[data-lev]", function (el) { state.leverage = Number(el.getAttribute("data-lev")); });
     bind("[data-grid]", function (el) { state.grid = el.getAttribute("data-grid"); });
     bind("[data-metric]", function (el) { state.metric = el.getAttribute("data-metric"); });
+    bind("[data-perf]", function (el) { state.perfMode = el.getAttribute("data-perf"); });
+    bind("[data-ann]", function (el) { state.annMode = el.getAttribute("data-ann"); });
 
     container.querySelectorAll(".mcell").forEach(function (cell) {
       function toggle() {
