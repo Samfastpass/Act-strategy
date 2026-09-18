@@ -26,10 +26,17 @@ hand-duplicated `computeBTC`/`computeSPY` functions. A new strategy is
 Clicking a strategy card opens a full-width detail panel:
 - **Equity chart** (`js/chart.js`) — hand-rolled SVG, no charting library.
   Strategy vs. buy & hold, both rebased to 1× at the window start, with
-  selectable 1y/3y/5y/10y/all windows and an exposure strip showing what
-  the strategy was actually holding at the time. The y-axis is **log
-  scale**: BTC equity spans five orders of magnitude and a linear axis
-  renders the first decade as a flat line on the axis.
+  selectable 1y/3y/5y/10y/all windows. The y-axis is **log scale**: BTC
+  equity spans five orders of magnitude and a linear axis renders the first
+  decade as a flat line on the axis.
+  Position is shown two ways at once, deliberately: **background colour
+  blocks** behind the curves (green at base leverage, amber once the vol
+  gate has ratcheted down; for BTC's continuous sizing, one hue at opacity
+  proportional to position size) *and* the original **exposure strip**
+  whose bar height encodes the same thing. The redundancy is the point —
+  green vs. amber is a hard pair for red-green colour blindness, so the
+  leverage level must never be carried by colour alone. The legend names
+  each level for the same reason. Don't "tidy up" by deleting the strip.
 - **Odds table** (`js/odds.js`) — conditional distribution of what happened
   between a given distance-from-SMA and the next flip, bucketed by
   extension band plus a tight ±1pp "now" row.
@@ -180,6 +187,31 @@ are wiped out by the single −20.5% day of 1987-10-19, and every survivor
 still carries a −98% to −99.9% drawdown. At 3x nothing is wiped out. So
 what makes the live 5x strategy survivable is **the vol gate**, not the
 choice of SMA or buffer — the gate had ratcheted it down before 1987.
+
+Clicking a cell opens two charts: `js/price-chart.js` (price, SMA, buffer band,
+in/out blocks) and `js/perf-chart.js` (performance + underwater).
+
+`js/perf-chart.js` stacks a mode-switchable top plot over an always-present
+**underwater panel** (`equity/runningPeak − 1`, filled downward, deepest point
+marked). The underwater panel is the reason the chart exists: "max drawdown
+−99.8%" gives the depth but hides the *duration*, and duration is the real cost
+— the live 200d/3% at 5x took **17.2 years** to regain its 1941 peak. The top
+plot toggles between total return (log, vs unleveraged buy & hold) and three
+annualised views: calendar-year bars, trailing 10-year annualised, and
+expanding CAGR since the window start.
+
+Two things that must not regress:
+- **Ruin on a log axis.** Zero equity has no position on it. The curve is
+  clamped to the axis floor after a wipeout and the event marked with a dashed
+  rule, rather than emitting `-Infinity` path coordinates. Underwater pins to
+  −100%; annualised views return −100% rather than `NaN`.
+- **Partial calendar years** at the window edges are shown as the actual
+  part-year return and labelled partial, never annualised into a stub figure.
+
+Free cross-check: the underwater panel's marked worst point and the matrix
+cell's max drawdown are computed by two separate code paths and must agree
+(both read −99.8% at 1941-10-16 for the live combo). If they ever diverge, one
+of them is broken.
 
 Implementation notes worth keeping:
 - The binary strategy is not new logic — it's the engine's `fixedLeverage`

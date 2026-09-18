@@ -65,9 +65,14 @@ shared. `js/chart.js` (log-scale SVG equity chart) and `js/odds.js`
 panel; see PROJECT_NOTES.md for the statistical caveats baked into the
 odds table. `js/explorer.js` is the S&P Leverage explorer (SMA × buffer
 heatmap over `SPX_MERGED`) with `js/price-chart.js` for its price/SMA/
-band/in-out detail chart — PROJECT_NOTES.md records its caching,
-per-period compounding and colour decisions, which are load-bearing
-rather than incidental.
+band/in-out detail chart and `js/perf-chart.js` for its performance +
+underwater chart — PROJECT_NOTES.md records its caching, per-period
+compounding, ruin-on-a-log-axis and colour decisions, which are
+load-bearing rather than incidental.
+
+Position/leverage is encoded **twice** on every chart that shows it —
+colour plus bar height or an explicit label — because green vs amber is a
+hard pair for red-green colour blindness. Don't collapse it to one.
 
 Both engines model **ruin**: equity floors at zero when a daily factor
 goes non-positive (a >1/leverage loss closes the fund) and it is

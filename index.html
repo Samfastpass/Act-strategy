@@ -168,6 +168,28 @@
   .cell-ruined { background: var(--cell-ruin); background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(156,43,43,0.28) 4px 8px); }
   .cell-ruined .c-main { color: var(--warn); font-size: 10px; letter-spacing: 0.03em; }
 
+  /* Exposure blocks on the Developed equity chart. Colour is a convenience,
+     never the sole encoding — the height strip and legend carry the level too,
+     since green vs amber is a hard pair for red-green colour blindness. */
+  .ch-blk.blk-full { fill: var(--long); opacity: 0.13; }
+  .ch-blk.blk-reduced { fill: var(--flat); opacity: 0.20; }
+  .ch-legend .sw-blk-full { background: var(--long); opacity: 0.45; height: 8px; }
+  .ch-legend .sw-blk-reduced { background: var(--flat); opacity: 0.6; height: 8px; }
+
+  /* Performance + underwater chart (explorer) */
+  .winbtns.sub { margin: -4px 0 10px; }
+  .pf-zero { stroke: var(--ink-faint); stroke-width: 1; }
+  .pf-uw { fill: var(--warn); opacity: 0.22; stroke: var(--warn); stroke-width: 1; stroke-opacity: 0.55; }
+  .pf-worst { fill: var(--warn); stroke: var(--card); stroke-width: 1.5; }
+  .pf-worsttext { fill: var(--warn); font-family: var(--mono); font-size: 9px; }
+  .pf-ruinline { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; }
+  .pf-ruintext { fill: var(--warn); font-family: var(--mono); font-size: 9px; }
+  .pf-bar.pos { fill: var(--long); }
+  .pf-bar.neg { fill: var(--warn); }
+  .pf-bar.partial { opacity: 0.55; }
+  .ch-legend .sw-pos { background: var(--long); height: 8px; }
+  .ch-legend .sw-neg { background: var(--warn); height: 8px; }
+
   .pc-in { fill: var(--long); opacity: 0.13; }
   .pc-band { fill: var(--ink-faint); opacity: 0.16; stroke: none; }
   .pc-sma { fill: none; stroke: var(--ink-faint); stroke-width: 1.3; }
@@ -199,6 +221,7 @@
 <script src="js/odds.js"></script>
 <script src="js/chart.js"></script>
 <script src="js/price-chart.js"></script>
+<script src="js/perf-chart.js"></script>
 <script src="js/render-helpers.js"></script>
 <script src="js/import-tools.js"></script>
 <script src="js/home.js"></script>
