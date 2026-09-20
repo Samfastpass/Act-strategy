@@ -1,0 +1,141 @@
+{
+  "_readme": "Single source of truth for every cost number the explorer applies. Each asset lists the REAL products you would hold at each leverage; the maths that turns those fields into a daily cost is js/cost-model.js (WisdomTree prospectus formula: P(t)=P(t-1)*(1+R)*(1-CA), R = L*return - (L-1)*(rate+fundingSpread)*D/360, CA = mgmtFee*D/360 + dailySwapRate*D, D = calendar days). Field names mirror the Final Terms. Every figure carries a confidence: 'sourced' = printed in the named document; 'fitted' = estimated by fitting real traded prices (method stated); 'assumed' = my assumption, not verified. An exposure is held via the smallest product whose leverage is >= it (so 2x uses the 3x product). Percentages are as printed: 0.75 = 0.75%, 0.00136 = 0.00136% PER DAY.",
+
+  "SP500": {
+    "name": "S&P 500",
+    "maxLeverage": 5,
+    "financingRateAsset": "FEDFUNDS",
+    "dividends": {
+      "series": "SPXDIV",
+      "why": "The explorer's S&P series (SPX_MERGED) is a PRICE index; every product below tracks TOTAL return, so the dividend yield is added back (x leverage). Without it a 5x fund is understated by ~5 x 1.3% = 6%/yr.",
+      "confidence": "sourced"
+    },
+    "products": [
+      {
+        "leverage": 1, "name": "Vanguard S&P 500 UCITS ETF (VUSA)", "isin": "IE00B3XXRP09",
+        "mgmtFeePct": 0.07, "dailySwapRatePct": 0, "fundingSpreadPct": 0, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "sourced" },
+        "source": { "label": "Vanguard — VUSA costs page: ongoing charges figure 0.07%", "url": "https://www.vanguardinvestor.co.uk/investments/vanguard-s-and-p-500-ucits-etf-usd-distributing/cost-minimums", "fetched": "2026-09-20" }
+      },
+      {
+        "leverage": 3, "name": "WisdomTree S&P 500 3x Daily Leveraged (3USL / 3LUS)", "isin": "IE00B7Y34M31",
+        "indexNote": "S&P 500 Net Total Return Index. Interest Rate = Fed Funds Effective Rate. Return on Collateral, Stock Borrow Rate, Transaction Tax: Not Applicable.",
+        "mgmtFeePct": 0.75, "dailySwapRatePct": 0.00136, "fundingSpreadPct": 1.245, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "sourced" },
+        "finalTermsFields": "Final Terms dated 2026-09-17 (issue 3,300): item 13 Annual Management Fee Rate 0.75% p.a.; item 14 Daily Swap Rate 0.00136% per day; item 15 Interest Rate = Fed Funds Effective Rate; item 16 Funding Spread 1.245%.",
+        "source": { "label": "WisdomTree S&P 500 3x Daily Leveraged product page (Final Terms IE00B7Y34M31, 2026-09-17)", "url": "https://www.wisdomtree.eu/en-gb/etps/equities/wisdomtree-sp-500-3x-daily-leveraged", "fetched": "2026-09-20" },
+        "crossCheck": "Model vs REAL 3USL prices, 2012-12 to 2026-09 (13.8y, S&P 500 total-return index): 36.5x real vs 35.6x model = +0.3%/yr drift. Fed Funds financing and the 1.245% spread are both needed: dropping the spread gives -2.2%/yr, and dropping both far worse."
+      },
+      {
+        "leverage": 5, "name": "WisdomTree S&P 500 5x Daily Leveraged (5USL / 5LUS)", "isin": "XS2771643025",
+        "indexNote": "S&P 500 Futures (0930-1600 ET) EXCESS-return index. Interest Rate = Stock Borrow Rate = Fed Funds; Funding Spread N/A. An excess-return index has already netted one unit of Fed Funds, so the product is 5 x total return - 4 x Fed Funds - fees: the same expression as the 3x with spread 0.",
+        "mgmtFeePct": 0.70, "dailySwapRatePct": 0.01736, "fundingSpreadPct": 0, "basisPct": 0.6,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "fitted" },
+        "basisNote": "basisPct is NOT in the Final Terms. It is an allowance for futures-implied financing running above Fed Funds. Fitted from 17 years of real US-listed S&P funds (SPXL 0.61%, UPRO 0.62%, SSO 0.58% per borrowed unit over Fed Funds); real 5USL ran ~3.5-4%/yr below the literal Final Terms formula over 2.3y, roughly 0.9-1.0% per borrowed unit, so 0.6 is the smaller, longer-sample number. Set it to 0 to see the documents-literal model.",
+        "finalTermsFields": "Final Terms dated 2026-09-01 (XS2771643025): item 11 Index; item 12 Product Leverage Factor +5; item 13 Annual Management Fee 0.70% p.a.; item 14 Daily Swap Rate 0.01736% per day; item 15 Interest Rate = Fed Funds Effective Rate; Funding Spread N/A; Stock Borrow Rate = Fed Funds.",
+        "source": { "label": "WisdomTree S&P 500 5x Daily Leveraged product page (Final Terms XS2771643025, 2026-09-01)", "url": "https://www.wisdomtree.com/gb/products/equities/wisdomtree-sp-500-5x-daily-leveraged", "fetched": "2026-09-19" },
+        "crossCheck": "Literal Final Terms formula vs REAL 5USL prices, 2024-05 to 2026-09 (2.3y only): 2.24x real vs 2.45-2.50x model = -3.5% to -4.0%/yr depending on the start date (real is worse); with the 0.6% basis allowance the gap is about -1.5%/yr. Dropping the Fed Funds financing entirely leaves the model 1.3x vs 2.24x real, so financing is unmistakably there. Precision is limited: the LSE closes ~11:30 ET, before the US close, and half the days are indicative zero-volume prices. Effective leverage measured 5.3x over 21-day windows."
+      }
+    ],
+    "crossChecks": [
+      "US-listed 3x/2x S&P funds SPXL, UPRO, SSO 2009-2026 (17y): daily slope on S&P total return 2.98 / 3.00 / 1.99 (R2 0.994+), model with Fed Funds financing within -1.3%/yr; implied extra spread ~0.6% per borrowed unit."
+    ],
+    "slippageBpsRoundTrip": { "low": 10, "medium": 25, "high": 60 },
+    "slippageConfidence": "assumed",
+    "slippageNote": "No disclosed bid/ask spread data found for these products. Low is anchored to the larger, cheaper WisdomTree product; high to the smaller, pricier Leverage Shares 3SPY (TER 4.06%) — TER and AUM as a liquidity proxy, not a measured spread."
+  },
+
+  "BTC": {
+    "name": "Bitcoin",
+    "maxLeverage": 1,
+    "leverageRestriction": "Leverage Shares' 3x Long Bitcoin ETP (BTC3) exists but is restricted to professional investors and not distributed to retail anywhere, including the UK. This is a regulatory wall, not a missing product.",
+    "financingRateAsset": null,
+    "dividends": { "constantPct": 0, "confidence": "sourced", "why": "Bitcoin pays no yield." },
+    "products": [
+      {
+        "leverage": 1, "name": "WisdomTree Physical Bitcoin (WXBT / BTCW)",
+        "mgmtFeePct": 0.35, "dailySwapRatePct": 0, "fundingSpreadPct": 0, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "sourced" },
+        "source": { "label": "WisdomTree Physical Bitcoin — TER 0.35% (cut from 0.95% in early 2024); the product this project's live BTC strategy names for execution", "url": "https://www.wisdomtree.eu/en-gb/products/ucits-etfs-unleveraged-etps/cryptocurrency/wisdomtree-physical-bitcoin", "fetched": "2026-09-19" }
+      }
+    ],
+    "slippageBpsRoundTrip": { "low": 20, "medium": 50, "high": 120 },
+    "slippageConfidence": "assumed",
+    "slippageNote": "No leveraged product exists to anchor a cheap/pricier pair. Tiers are a reasoned schedule reflecting that crypto ETP spreads typically run wider than equity-index ETP spreads, not measured data."
+  },
+
+  "GOLD": {
+    "name": "Gold",
+    "maxLeverage": 3,
+    "financingRateAsset": "FEDFUNDS",
+    "dividends": { "constantPct": 0, "confidence": "sourced", "why": "Gold pays no yield." },
+    "products": [
+      {
+        "leverage": 1, "name": "iShares Physical Gold ETC (SGLN / IGLN)", "isin": "IE00B4ND3602",
+        "mgmtFeePct": 0.12, "dailySwapRatePct": 0, "fundingSpreadPct": 0, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "sourced" },
+        "source": { "label": "iShares — Physical Gold ETC: TER 0.12%", "url": "https://www.ishares.com/uk/individual/en/products/258441/ishares-physical-gold-etc-fund", "fetched": "2026-09-20" }
+      },
+      {
+        "leverage": 3, "name": "WisdomTree Gold 3x Daily Leveraged (3GOL / 3LGO)",
+        "mgmtFeePct": 0.99, "dailySwapRatePct": 0, "fundingSpreadPct": 1.245, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "assumed", "dailySwapRatePct": "assumed", "fundingSpreadPct": "assumed", "basisPct": "assumed" },
+        "note": "Final Terms NOT seen for this product. 0.99% is the platform-quoted blended TER (management + swap together, so the swap is set to 0 here to avoid double counting). The 1.245% funding spread is copied from the 3USL Final Terms (same issuer, same structure). A cross-check against gold futures came out 1.7%/yr worse than this template, but continuous futures carry roll gaps, so it is not conclusive. Treat as an estimate until its Final Terms are checked.",
+        "source": { "label": "WisdomTree Gold 3x Daily Leveraged product page (TER 0.99%)", "url": "https://www.wisdomtree.eu/en-gb/etps/commodities/wisdomtree-gold-3x-daily-leveraged", "fetched": "2026-09-19" }
+      }
+    ],
+    "slippageBpsRoundTrip": { "low": 15, "medium": 35, "high": 80 },
+    "slippageConfidence": "assumed",
+    "slippageNote": "Only one leveraged gold product found (no cheap/pricier pair) — a reasoned schedule, not measured spread data."
+  },
+
+  "NASDAQ100": {
+    "name": "Nasdaq 100",
+    "maxLeverage": 3,
+    "financingRateAsset": "FEDFUNDS",
+    "dividends": { "constantPct": 0.8, "confidence": "assumed", "why": "The Nasdaq series is a price-only ETF proxy (QQQ); the products track total return. No yield series was available, so a flat 0.8%/yr is assumed (the real yield has ranged roughly 0.4-1.5%)." },
+    "products": [
+      {
+        "leverage": 1, "name": "iShares NASDAQ 100 UCITS ETF (CNDX)", "isin": "IE00B53SZB19",
+        "mgmtFeePct": 0.30, "dailySwapRatePct": 0, "fundingSpreadPct": 0, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "sourced" },
+        "source": { "label": "iShares — NASDAQ 100 UCITS ETF: TER 0.30%", "url": "https://www.ishares.com/uk/individual/en/products/253741/ishares-nasdaq-100-ucits-etf", "fetched": "2026-09-20" }
+      },
+      {
+        "leverage": 3, "name": "WisdomTree NASDAQ 100 3x Daily Leveraged (QQQ3 / 3QQQ)",
+        "mgmtFeePct": 0.75, "dailySwapRatePct": 0.00136, "fundingSpreadPct": 0.3, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "assumed", "dailySwapRatePct": "assumed", "fundingSpreadPct": "fitted", "basisPct": "sourced" },
+        "note": "Final Terms NOT seen. Fee and swap rate are copied from the 3USL Final Terms (same issuer/structure). The 0.3% funding spread is fitted: it makes the model match 13.7 years of real QQQ3 prices (with the template's 1.245% the model came out 1.9%/yr too low). The fit assumes the 0.8% yield above, so it is only as good as that.",
+        "source": { "label": "WisdomTree NASDAQ 100 3x Daily Leveraged product page", "url": "https://www.wisdomtree.eu/en-gb/etps/equities/wisdomtree-nasdaq-100-3x-daily-leveraged", "fetched": "2026-09-19" }
+      }
+    ],
+    "slippageBpsRoundTrip": { "low": 12, "medium": 30, "high": 70 },
+    "slippageConfidence": "assumed",
+    "slippageNote": "Only one leveraged Nasdaq-100 product found (no cheap/pricier pair) — a reasoned schedule, not measured spread data."
+  },
+
+  "FTSE100": {
+    "name": "FTSE 100",
+    "maxLeverage": 3,
+    "financingRateAsset": "SONIA",
+    "dividends": { "constantPct": 3.7, "confidence": "assumed", "why": "The FTSE series is a price-only ETF proxy; the products track total return. No yield series was available, so a flat 3.7%/yr is assumed (typical FTSE 100 yield). Unlike the S&P this is a large number, so it matters." },
+    "products": [
+      {
+        "leverage": 1, "name": "Vanguard FTSE 100 UCITS ETF (VUKE)", "isin": "IE00B810Q511",
+        "mgmtFeePct": 0.09, "dailySwapRatePct": 0, "fundingSpreadPct": 0, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "sourced", "basisPct": "sourced" },
+        "source": { "label": "Vanguard — FTSE 100 UCITS ETF costs page: ongoing charges figure 0.09%", "url": "https://www.vanguardinvestor.co.uk/investments/vanguard-ftse-100-ucits-etf-gbp-distributing/cost-minimums", "fetched": "2026-09-20" }
+      },
+      {
+        "leverage": 3, "name": "WisdomTree FTSE 100 3x Daily Leveraged (3UKL)",
+        "mgmtFeePct": 0.75, "dailySwapRatePct": 0.009, "fundingSpreadPct": 0, "basisPct": 0,
+        "confidence": { "mgmtFeePct": "sourced", "dailySwapRatePct": "sourced", "fundingSpreadPct": "assumed", "basisPct": "assumed" },
+        "note": "Final Terms NOT seen; fee 0.75% and swap 0.009% per day (~3.3%/yr) are from the WisdomTree product page and match the ~3.99% 'ongoing charge' AJ Bell shows for 3UKL. Funding spread is set to 0, by analogy with 5USL where the large swap rate stands in for the spread. Cross-check vs 13.7y of real 3UKL prices, assuming the 3.7% yield above: within ~1%/yr.",
+        "source": { "label": "WisdomTree FTSE 100 3x Daily Leveraged (3UKL) product page", "url": "https://www.wisdomtree.eu/en-gb/etps/equities/wisdomtree-ftse-100-3x-daily-leveraged", "fetched": "2026-09-19" }
+      }
+    ],
+    "slippageBpsRoundTrip": { "low": 12, "medium": 30, "high": 70 },
+    "slippageConfidence": "assumed",
+    "slippageNote": "Only one leveraged FTSE 100 product found (no cheap/pricier pair) — a reasoned schedule, not measured spread data."
+  }
+}

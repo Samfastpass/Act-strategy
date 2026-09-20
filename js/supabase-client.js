@@ -23,6 +23,9 @@ window.App = window.App || {};
 
   // Maps the asset names used in strategies.json / Supabase ("BTC", "SPX",
   // "SPY", "SPX_MERGED") to the camelCase keys used on the in-memory data object.
-  var ASSET_KEYS = { BTC: "btc", SPX: "spx", SPY: "spy", SPX_MERGED: "spxMerged" };
+  var ASSET_KEYS = {
+    BTC: "btc", SPX: "spx", SPY: "spy", SPX_MERGED: "spxMerged",
+    GOLD: "gold", NASDAQ100: "nasdaq100", FTSE100: "ftse100"
+  };
   window.App.assetKey = function (assetName) { return ASSET_KEYS[assetName]; };
 })();

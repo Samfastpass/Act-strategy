@@ -20,27 +20,41 @@ window.PerfChart = (function () {
   var UW_TOP = PAD_T + MAIN_H + GAP;
   var MAX_POINTS = 1100;
 
-  // Compound the selected window, recording equity, the running peak and the
-  // drawdown at each step. Mirrors windowStats() in js/explorer.js — the two
-  // are deliberately separate so their max-drawdown figures cross-check.
-  function buildSeries(prices, wk, leverage, lo, hi) {
-    var eq = 1, peak = 1;
-    var out = [{ date: prices[lo].date, eq: 1, dd: 0, hold: 1 }];
-    var ruinIdx = -1;
+  // Compound the selected window via the shared StrategyEngine.compoundEquity
+  // core — the same one the explorer's matrix (js/explorer.js's windowStats)
+  // and the Developed tab's equity chart use. This used to be its own
+  // parallel inline loop; consolidated so leverage/ruin/cost logic lives in
+  // exactly one place. (An earlier version of this file deliberately kept
+  // two independent implementations so their drawdown figures cross-checked
+  // each other — reasonable when the loop was simple, but the cost model
+  // added enough surface area that two copies risked silently drifting out
+  // of sync, which is exactly the failure mode PROJECT_NOTES.md's leverage
+  // bug came from. The cross-check role now lives in strategy_lib.py plus
+  // one-off independent verification, not a second production code path.)
+  function buildSeries(prices, wk, leverage, lo, hi, costs) {
+    var exposure = new Array(hi + 1);
+    for (var i = lo; i <= hi; i++) exposure[i] = wk.state[i] > 0 ? leverage : 0;
+    var curve = window.StrategyEngine.compoundEquity(prices, exposure, lo, hi, costs || null);
+
     var base = prices[lo].close;
-    for (var i = lo + 1; i <= hi; i++) {
-      var prevIn = wk.state[i - 1] > 0;
-      var r = prices[i].close / prices[i - 1].close - 1;
-      var factor = prevIn ? 1 + leverage * r : 1;
-      if (factor <= 0) { if (ruinIdx < 0) ruinIdx = out.length; eq = 0; }
-      else if (eq > 0) eq *= factor;
-      if (eq > peak) peak = eq;
-      out.push({
-        date: prices[i].date, eq: eq,
-        dd: peak > 0 ? eq / peak - 1 : -1,
-        hold: prices[i].close / base
+    // Buy & hold reference: unleveraged and cost-free, but with dividends
+    // reinvested when the series is price-only — otherwise the strategy (which
+    // receives them) would be compared against a benchmark that doesn't.
+    var holdCurve = null;
+    if (costs && costs.dividendYieldForDate) {
+      var ones = new Array(hi + 1).fill(1);
+      holdCurve = window.StrategyEngine.compoundEquity(prices, ones, lo, hi, {
+        products: [{ leverage: 1 }], dividendYieldForDate: costs.dividendYieldForDate
       });
     }
+    var peak = 1;
+    var out = curve.map(function (p, idx) {
+      var i = lo + idx;
+      if (p.equity > peak) peak = p.equity;
+      var dd = peak > 0 ? p.equity / peak - 1 : -1;
+      return { date: p.date, eq: p.equity, dd: dd, hold: holdCurve ? holdCurve[idx].equity : prices[i].close / base };
+    });
+    var ruinIdx = curve.ruinedAt ? out.findIndex(function (p) { return p.date === curve.ruinedAt; }) : -1;
     return { pts: out, ruinIdx: ruinIdx };
   }
 
@@ -105,7 +119,7 @@ window.PerfChart = (function () {
   }
 
   // --- rendering ----------------------------------------------------------
-  function render(prices, selected, leverage, period, wk, mode, annMode) {
+  function render(prices, selected, leverage, period, wk, mode, annMode, costs) {
     var lo = period.from ? prices.findIndex(function (p) { return p.date >= period.from; }) : 0;
     if (lo < 0) lo = 0;
     lo = Math.max(lo, wk.startIdx);
@@ -115,7 +129,7 @@ window.PerfChart = (function () {
     }
     if (hi - lo < 3) return '<div class="panel"><div class="loading">Not enough history in this period.</div></div>';
 
-    var built = buildSeries(prices, wk, leverage, lo, hi);
+    var built = buildSeries(prices, wk, leverage, lo, hi, costs);
     var pts = built.pts;
     var ruined = built.ruinIdx >= 0;
     var ruinDate = ruined ? pts[built.ruinIdx].date : null;
@@ -172,7 +186,7 @@ window.PerfChart = (function () {
       legend = '<span><i class="sw-strat"></i>Strategy at ' + leverage + '× <b>' + (pts[pts.length - 1].eq > 0 ? fmt(pts[pts.length - 1].eq, 2) + '×' : '0 — wiped out') + '</b></span>'
         + '<span><i class="sw-hold"></i>Buy &amp; hold (1×) <b>' + fmt(pts[pts.length - 1].hold, 2) + '×</b></span>'
         + '<span class="ch-note">log scale, rebased to 1× at ' + pts[0].date + '</span>';
-      note = 'Total growth of £1. Buy &amp; hold is shown unleveraged for reference, so the gap is what the leverage and the timing did together.';
+      note = 'Total growth of £1, net of the costs configured on this tab. Buy &amp; hold is shown unleveraged and cost-free (dividends reinvested) for reference, so the gap is what the leverage, its costs, and the timing did together.';
     } else {
       // Annualised: linear % axis with an emphasised zero line.
       var bars = annMode === "calendar" ? calendarYears(pts) : null;
@@ -274,7 +288,7 @@ window.PerfChart = (function () {
       : 'Never regained its previous peak within this period.';
 
     return '<div class="panel">'
-      + '<div class="detail-head"><h2>Performance &mdash; ' + selected.sma + 'd / ' + selected.buffer + '% at ' + leverage + '×</h2>'
+      + '<div class="detail-head"><h2>Performance (net of costs) &mdash; ' + selected.sma + 'd / ' + selected.buffer + '% at ' + leverage + '×</h2>'
       + '<div class="winbtns">'
       + '<button class="winbtn' + (mode === "total" ? " active" : "") + '" data-perf="total">Total return</button>'
       + '<button class="winbtn' + (mode === "ann" ? " active" : "") + '" data-perf="ann">Annualised</button>'

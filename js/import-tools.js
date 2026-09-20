@@ -12,7 +12,21 @@
 window.ImportTools = (function () {
   var fmt = window.App.fmt;
   var LS_KEY = "strategy_tracker_twelvedata_key";
-  var TWELVEDATA_SYMBOLS = { BTC: "BTC/USD", SPY: "SPY" };
+  // backfillFrom only matters for an asset with no existing rows yet (the
+  // three new explorer assets) — it's where a first-ever fetch starts from.
+  // Existing assets (BTC/SPY) always have rows already, so they ignore it
+  // and refresh from their last stored date instead.
+  var TWELVEDATA_SYMBOLS = {
+    BTC: { symbol: "BTC/USD" },
+    SPY: { symbol: "SPY" },
+    GOLD: { symbol: "XAU/USD", backfillFrom: "1990-01-01" },
+    // QQQ and S100 are real, liquid ETF proxies confirmed against Twelve
+    // Data's symbol_search (see PROJECT_NOTES.md) — not the raw multi-decade
+    // index. History only goes back to each ETF's own inception, materially
+    // shorter than SPX_MERGED's 1928+.
+    NASDAQ100: { symbol: "QQQ", exchange: "NASDAQ", backfillFrom: "1999-01-01" },
+    FTSE100: { symbol: "S100", mic: "XLON", backfillFrom: "2011-01-01" }
+  };
 
   function getSavedApiKey() {
     try { return localStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; }
@@ -31,17 +45,40 @@ window.ImportTools = (function () {
   }
   function todayUTC() { return new Date().toISOString().slice(0, 10); }
 
-  async function fetchTwelveData(symbol, startDate, endDate, apiKey) {
+  async function fetchTwelveData(symbolCfg, startDate, endDate, apiKey) {
     var url = "https://api.twelvedata.com/time_series"
-      + "?symbol=" + encodeURIComponent(symbol)
+      + "?symbol=" + encodeURIComponent(symbolCfg.symbol)
       + "&interval=1day&order=ASC&format=JSON"
       + "&start_date=" + startDate + "&end_date=" + endDate
       + "&apikey=" + encodeURIComponent(apiKey);
+    if (symbolCfg.exchange) url += "&exchange=" + encodeURIComponent(symbolCfg.exchange);
+    if (symbolCfg.mic) url += "&mic_code=" + encodeURIComponent(symbolCfg.mic);
     var res = await fetch(url);
     var json = await res.json();
     if (json.status === "error") throw new Error(json.message || "Twelve Data error");
     if (!json.values) return [];
     return json.values.map(function (v) { return { date: v.datetime.slice(0, 10), close: parseFloat(v.close) }; });
+  }
+
+  // Twelve Data's free tier caps a single request at ~5000 points (~19 years
+  // of daily data). A brand-new asset's first-ever fetch can span decades, so
+  // chunk it — 12-year windows stay safely under the cap for any daily-
+  // frequency asset, including one (like BTC) with no weekend gaps.
+  async function fetchTwelveDataRange(symbolCfg, startDate, endDate, apiKey) {
+    var CHUNK_YEARS = 12;
+    var rows = [];
+    var chunkStart = startDate;
+    while (chunkStart <= endDate) {
+      var d = new Date(chunkStart + "T00:00:00Z");
+      d.setUTCFullYear(d.getUTCFullYear() + CHUNK_YEARS);
+      var chunkEnd = d.toISOString().slice(0, 10);
+      if (chunkEnd > endDate) chunkEnd = endDate;
+      var chunkRows = await fetchTwelveData(symbolCfg, chunkStart, chunkEnd, apiKey);
+      rows = rows.concat(chunkRows);
+      if (chunkEnd >= endDate) break;
+      chunkStart = addDaysUTC(chunkEnd, 1);
+    }
+    return rows;
   }
 
   function parseCsv(text) {
@@ -97,7 +134,10 @@ window.ImportTools = (function () {
       + '<div class="panel">'
       + '<h2>Drop a CSV to import</h2>'
       + '<div class="formrow" style="grid-template-columns: 1fr auto;">'
-      + '<div class="field"><label>Asset</label><select id="csv-asset-select"><option value="BTC">BTC</option><option value="SPX">SPX</option><option value="SPY">SPY</option></select></div>'
+      + '<div class="field"><label>Asset</label><select id="csv-asset-select">'
+      + '<option value="BTC">BTC</option><option value="SPX">SPX</option><option value="SPY">SPY</option>'
+      + '<option value="GOLD">GOLD</option><option value="NASDAQ100">NASDAQ100</option><option value="FTSE100">FTSE100</option>'
+      + '</select></div>'
       + '<div></div>'
       + '</div>'
       + '<div class="dropzone" id="csv-dropzone" tabindex="0">Drop a CSV here, or click to choose a file<br><span style="font-size:11px;">expects a date/datetime column and a close column</span></div>'
@@ -144,12 +184,19 @@ window.ImportTools = (function () {
         var results = {};
         var lines = [];
         for (var asset in TWELVEDATA_SYMBOLS) {
-          var lastRow = data[window.App.assetKey(asset)].slice(-1)[0];
-          var start = lastRow ? addDaysUTC(lastRow.date, 1) : null;
+          var cfg = TWELVEDATA_SYMBOLS[asset];
+          var existing = data[window.App.assetKey(asset)] || [];
+          var lastRow = existing.slice(-1)[0];
+          // A brand-new asset with no rows yet starts from its configured
+          // backfill date and pulls full history; an asset that already has
+          // data just tops up from where it left off, same as before.
+          var start = lastRow ? addDaysUTC(lastRow.date, 1) : cfg.backfillFrom;
           if (!start || start > end) { lines.push(asset + ": already up to date"); continue; }
-          var rows = await fetchTwelveData(TWELVEDATA_SYMBOLS[asset], start, end, apiKey);
+          var isBackfill = !lastRow;
+          var rows = await fetchTwelveDataRange(cfg, start, end, apiKey);
           results[asset] = rows;
-          lines.push(asset + ": " + rows.length + " new day(s)" + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : ""));
+          lines.push(asset + (isBackfill ? " (full history)" : "") + ": " + rows.length + " new day(s)"
+            + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : ""));
         }
         pendingTd = results;
         tdPreviewBody.innerHTML = lines.join("<br>");

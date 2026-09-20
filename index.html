@@ -85,7 +85,7 @@
 
   .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
   .detail-head h2 { margin: 0; }
-  .winbtns { display: flex; gap: 4px; }
+  .winbtns { display: flex; gap: 4px; flex-wrap: wrap; }
   .winbtn { font-family: var(--mono); font-size: 11px; padding: 4px 9px; border-radius: 5px; border: 1px solid var(--line); background: var(--paper); color: var(--ink-soft); cursor: pointer; }
   .winbtn:hover { border-color: var(--ink-faint); }
   .winbtn.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
@@ -110,6 +110,23 @@
     .statrow.cagr-row { grid-template-columns: repeat(2, 1fr); }
     .detail-head { align-items: flex-start; }
   }
+
+  .winbtn[disabled] { opacity: 0.35; cursor: not-allowed; }
+  .cost-grid { display: grid; gap: 12px; margin-bottom: 10px; }
+  .cost-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+  .cost-row label { flex: 1 1 320px; color: var(--ink-soft); }
+  .cost-row input[type="number"] { width: 90px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-family: var(--mono); font-size: 12px; padding: 0 8px; }
+  .cost-row .cost-static { font-family: var(--mono); font-weight: 600; min-width: 60px; }
+  .conf-badge { font-size: 10px; font-family: var(--mono); padding: 2px 7px; border-radius: 100px; letter-spacing: 0.02em; }
+  .conf-badge.conf-sourced { color: var(--long); background: var(--long-bg); }
+  .conf-badge.conf-estimated { color: var(--flat); background: var(--flat-bg); }
+  .conf-badge.conf-edited { color: var(--ink-soft); background: var(--line); }
+  .src-list { margin: 6px 0 0; padding-left: 18px; }
+  .src-list li { margin-bottom: 3px; }
+  .cost-row .toolsrow { flex-basis: 100%; }
+  .toolsrow a, .src-list a { color: var(--ink-soft); text-decoration: underline; }
+  .toolsrow details summary { cursor: pointer; }
+  .src-date { color: var(--ink-faint); }
 
   .oddswrap { overflow-x: auto; }
   table.odds { min-width: 560px; }
@@ -216,6 +233,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="js/supabase-client.js"></script>
+<script src="js/cost-model.js"></script>
 <script src="js/strategy-engine.js"></script>
 <script src="js/merge-series.js"></script>
 <script src="js/odds.js"></script>
