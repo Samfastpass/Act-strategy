@@ -353,6 +353,57 @@ cross-check role that duplication used to serve (two independent
 implementations agreeing) is now served by `strategy_lib.py`, which is
 executed for real, not desk-checked (see the ground-truth section below).
 
+## Evaluator tab (added 2026-09-20)
+The Explorer answers "what is the best setting?". This tab answers the harder
+one: "does that setting hold up outside the stretch of history that made it
+look good?" — the question the overfitting work made unavoidable.
+
+Save a strategy from the Explorer's parameter bar (**Save to Evaluator**) and
+it appears here as a row, scored across **fixed, non-negotiable periods**: the
+2020s, 2010s, 2000s, 1990s and 1980s, plus 1970–2000, 2000–now and 2010–now.
+Fixed rather than a period picker on purpose — the point is that you cannot
+quietly choose the window that flatters a strategy.
+- **Rows**: up to 8 saved strategies plus one **buy & hold 1×** benchmark row
+  per asset in use (held at 1× through `wk.out`, so it pays the tracker's fee
+  and never trades).
+- **Columns**: the eight periods, then **Mean**, **Worst** and **Beat 1×**.
+  Those three use the **five decades only** — the long spans overlap them, so
+  including them would double-count the recent past.
+- **Colour is relative to the column**, not absolute: every period has its own
+  market backdrop, so an absolute ramp would only show which decades were kind.
+  The question here is which strategy won a given period. The benchmark is in
+  the scale, so "beat buy & hold" is visible as colour.
+- Metric toggle: CAGR (with max drawdown underneath), max drawdown, or Calmar.
+- Saved strategies live in **localStorage** (`strategy_tracker_saved_configs_v1`),
+  this browser only — not in the repo, not synced. Every read/write is
+  try/catch'd, so a private window or blocked storage degrades to "nothing
+  saved" rather than breaking the tab. Saving an exact duplicate is refused by
+  name. Rename, reorder and remove live in the panel below the table.
+- An asset with no price history loaded renders as blank cells plus a banner
+  naming the asset — not a broken table.
+
+### `js/strategy-config.js` — what a strategy IS, shared by both tabs
+Added with the Evaluator. It owns the parameter registry, validity rules
+(`resolve`), normalisation, the walk + its caches, `windowStats`, the cost
+config, the saved-strategy list, and the session settings **both tabs must
+agree on** (slippage tier, fee edits) — so a fee typed on the Explorer moves
+the Evaluator's numbers. The Explorer kept only its own UI state and now
+delegates (it went from ~900 to ~700 lines). A second copy of this pipeline in
+the Evaluator is exactly the duplication that let the leverage bug ship in one
+place and not the other.
+
+**Two bugs this refactor surfaced, both worth remembering:**
+- **Cache keys must not be array indices.** `evaluate`/`benchmark` first keyed
+  the shared stats cache on `periodIdx`. The Explorer's period 0 is "All" and
+  the Evaluator's is "2020s", so the Evaluator's 2020s column silently served
+  all-time numbers (+18.6% instead of +21.5%). Keys now use `periodSig()` —
+  the window's actual `from..to` bounds. Any future cache key must identify
+  *what the thing is*, never *where it sat in some list*.
+- **A tab that reads shared state must re-render when shown.** `switchTab`
+  only toggled `display`, so the Evaluator kept whatever it had built at load
+  and ignored a slippage-tier change made on the Explorer. It now re-renders
+  on show (cheap — results are cached).
+
 ## Cost model (rebuilt 2026-09-20)
 **Read this section before touching costs.** The first version of this model
 (shipped only on an unmerged branch) was wrong, and the way it was wrong is

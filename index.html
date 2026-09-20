@@ -245,6 +245,23 @@
   .mx-head select { height: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 12px; padding: 0 6px; }
   .mx-head .winbtn { margin-left: auto; }
   .mx-axis { font-family: var(--mono); }
+  /* Evaluator */
+  .save-msg { font-size: 11px; font-style: italic; }
+  .save-msg.ok { color: var(--long); }
+  .save-msg.err { color: var(--warn); }
+  table.evaluator th.ev-name { text-align: left; min-width: 190px; max-width: 260px; white-space: normal; }
+  table.evaluator .ev-title { display: block; font-weight: 600; font-size: 12px; }
+  table.evaluator .ev-sub { display: block; font-size: 10px; color: var(--ink-faint); font-weight: 400; font-family: var(--mono); }
+  table.evaluator th.span-col { border-left: 2px solid var(--line); }
+  table.evaluator td.span-col { border-left: 2px solid var(--line); }
+  table.evaluator .ev-sum { font-family: var(--mono); font-size: 12px; text-align: center; background: var(--paper); }
+  table.evaluator tr.bench-row td, table.evaluator tr.bench-row th { border-top: 2px solid var(--line); }
+  .ev-manage { display: grid; gap: 6px; }
+  .ev-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .ev-item-name { font-weight: 600; }
+  .ev-item-sub { color: var(--ink-faint); font-family: var(--mono); font-size: 11px; }
+  .ev-item-btns { margin-left: auto; display: flex; gap: 4px; }
+  .ev-rename { height: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 12px; padding: 0 8px; min-width: 200px; }
   .pc-band { fill: var(--ink-faint); opacity: 0.16; stroke: none; }
   .pc-sma { fill: none; stroke: var(--ink-faint); stroke-width: 1.3; }
   .pc-price { fill: none; stroke: var(--ink); stroke-width: 1.4; }
@@ -262,15 +279,18 @@
     <button class="tab active" data-tab="home">Home</button>
     <button class="tab" data-tab="developed">Developed strategies</button>
     <button class="tab" data-tab="explorer">Strategy Explorer</button>
+    <button class="tab" data-tab="evaluator">Evaluator</button>
   </nav>
   <div id="tab-home"></div>
   <div id="tab-developed" style="display:none;"></div>
   <div id="tab-explorer" style="display:none;"></div>
+  <div id="tab-evaluator" style="display:none;"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="js/supabase-client.js"></script>
 <script src="js/cost-model.js"></script>
+<script src="js/strategy-config.js"></script>
 <script src="js/strategy-engine.js"></script>
 <script src="js/merge-series.js"></script>
 <script src="js/odds.js"></script>
@@ -283,6 +303,7 @@
 <script src="js/home.js"></script>
 <script src="js/developed.js"></script>
 <script src="js/explorer.js"></script>
+<script src="js/evaluator.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

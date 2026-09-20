@@ -7,7 +7,8 @@
   var panels = {
     home: document.getElementById("tab-home"),
     developed: document.getElementById("tab-developed"),
-    explorer: document.getElementById("tab-explorer")
+    explorer: document.getElementById("tab-explorer"),
+    evaluator: document.getElementById("tab-evaluator")
   };
 
   window.addEventListener("error", function (e) {
@@ -66,6 +67,12 @@
     }
   };
 
+  // The Explorer calls this after saving a strategy, so the Evaluator is up to
+  // date the moment you switch to it.
+  window.App.refreshEvaluator = function () {
+    if (state.data) window.Evaluator.render(panels.evaluator, state.data, state.costAssumptions, state.refRates);
+  };
+
   function renderAll() {
     if (asofEl && state.data.btc.length) {
       asofEl.textContent = "as of " + state.data.btc[state.data.btc.length - 1].date + " close";
@@ -73,12 +80,17 @@
     window.Home.render(panels.home, state.data, state.strategies, ctx);
     window.Developed.render(panels.developed, state.data, state.strategies, ctx);
     window.Explorer.render(panels.explorer, state.data, state.costAssumptions, state.refRates, ctx);
+    window.Evaluator.render(panels.evaluator, state.data, state.costAssumptions, state.refRates);
   }
 
   function switchTab(name) {
     Object.keys(panels).forEach(function (key) {
       panels[key].style.display = key === name ? "" : "none";
     });
+    // The Evaluator reads shared settings the Explorer owns (slippage tier, fee
+    // edits), so it is re-rendered on show rather than left as whatever was
+    // built at load. Its results are cached, so this is cheap.
+    if (name === "evaluator") window.App.refreshEvaluator();
     tabnav.querySelectorAll(".tab").forEach(function (btn) {
       btn.classList.toggle("active", btn.getAttribute("data-tab") === name);
     });
