@@ -47,12 +47,15 @@
   }
 
   async function loadAllData() {
-    var assets = ["BTC", "SPX", "SPY", "SPX_MERGED"];
+    var assets = ["BTC", "SPX", "SPY", "SPX_MERGED", "GOLD", "NASDAQ100", "FTSE100"];
     var results = await Promise.all(assets.map(loadAsset));
-    return { btc: results[0], spx: results[1], spy: results[2], spxMerged: results[3] };
+    return {
+      btc: results[0], spx: results[1], spy: results[2], spxMerged: results[3],
+      gold: results[4], nasdaq100: results[5], ftse100: results[6]
+    };
   }
 
-  var state = { data: null, strategies: null };
+  var state = { data: null, strategies: null, costAssumptions: null, refRates: null };
 
   var ctx = {
     sb: sb,
@@ -69,7 +72,7 @@
     }
     window.Home.render(panels.home, state.data, state.strategies, ctx);
     window.Developed.render(panels.developed, state.data, state.strategies, ctx);
-    window.Explorer.render(panels.explorer, state.data);
+    window.Explorer.render(panels.explorer, state.data, state.costAssumptions, state.refRates);
   }
 
   function switchTab(name) {
@@ -89,6 +92,10 @@
     try {
       var stratRes = await fetch("strategies.json");
       state.strategies = await stratRes.json();
+      var costRes = await fetch("cost-assumptions.json");
+      state.costAssumptions = await costRes.json();
+      var refRes = await fetch("reference-rates.json");
+      state.refRates = await refRes.json();
 
       state.data = await loadAllData();
       if (state.data.btc.length === 0 || state.data.spy.length === 0) {

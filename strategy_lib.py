@@ -36,11 +36,51 @@ def realized_vol(closes, n, annualization=252):
     return vol
 
 
+def _monthly(series, month):
+    """Value for 'YYYY-MM' in a {month: value} dict, holding the first/last
+    value outside its range (mirrors refSeriesFn in js/explorer.js)."""
+    if month in series:
+        return series[month]
+    keys = sorted(series)
+    return series[keys[0]] if month < keys[0] else series[keys[-1]]
+
+
+def pick_product(products, exposure):
+    """The smallest listed product with leverage >= exposure, else the largest."""
+    if not products:
+        return None
+    for p in sorted(products, key=lambda p: p["leverage"]):
+        if exposure <= p["leverage"] + 1e-9:
+            return p
+    return max(products, key=lambda p: p["leverage"])
+
+
+def product_factor(exposure, total_return, days, base_rate_pct, product):
+    """One day's growth factor for a leveraged product, straight from the
+    WisdomTree prospectus formula (see run_backtest's docstring)."""
+    p = product or {}
+    financing = max(0.0, exposure - 1.0) * (base_rate_pct + p.get("funding_spread_pct", 0.0)) / 100.0 * days / 360.0
+    r = exposure * total_return - financing
+    ca = (p.get("mgmt_fee_pct", 0.0) / 100.0 * days / 360.0
+          + p.get("daily_swap_rate_pct", 0.0) / 100.0 * days) * min(exposure, 1.0)
+    return (1.0 + r) * (1.0 - ca)
+
+
+def load_reference_series(path, name):
+    """{'YYYY-MM': value} for a series in reference-rates.json (FEDFUNDS,
+    SONIA or SPXDIV)."""
+    import json
+    with open(path, encoding="utf-8") as f:
+        return {m: v for m, v in json.load(f)[name]["series"]}
+
+
 def run_backtest(dates, closes, sma_n, buffer,
                   vol_n=None, vol_gate=None, leverage_high=1.0, leverage_low=1.0,
                   annualization=252,
                   size_mode="fixed", vol_target=None, max_size=1.0,
-                  rebalance_band=0.0):
+                  rebalance_band=0.0,
+                  products=None, rate_monthly=None, dividend_monthly=None,
+                  slippage_bps_round_trip=0.0):
     """
     Run the SMA + buffer trend filter, with an optional volatility overlay
     that either gates leverage or sets position size, over a full price series.
@@ -64,6 +104,32 @@ def run_backtest(dates, closes, sma_n, buffer,
         A trade only happens when |held - target| > rebalance_band, so the
         held size persists through small drifts (a no-trade band). This is
         path-dependent: `held` carries forward day to day.
+
+    Cost model (all optional, default to zero — a no-cost call reproduces
+    the pre-cost-model numbers exactly). This is written from the WisdomTree
+    prospectus formula (base prospectus p.72 / p.199), independently of
+    js/cost-model.js, so the two can be diffed. See cost-assumptions.json for
+    where each product's figures come from.
+
+        P(t) = P(t-1) * (1 + R) * (1 - CA)
+        R    = L * total_return - (L-1) * (base_rate + funding_spread) * D/360
+        CA   = mgmt_fee * D/360 + daily_swap_rate * D          (x min(L,1))
+        total_return = price return + dividend_yield * D/365.25
+
+    D is CALENDAR days since the previous row (3 over a weekend), never 1 per
+    row — annual rates must accrue over a calendar year whether the asset has
+    252 or 365 rows in it (same bug class as the CAGR row-count fix below).
+
+        products         — list of dicts {leverage, mgmt_fee_pct,
+                           daily_swap_rate_pct, funding_spread_pct}. An
+                           exposure is held via the smallest product whose
+                           leverage >= it (the largest if none is big enough).
+        rate_monthly     — {"YYYY-MM": pct}, the Fed Funds / SONIA month
+                           average; first/last value held outside its range.
+        dividend_monthly — {"YYYY-MM": pct} yield, only for PRICE-only series.
+        slippage_bps_round_trip — one-off cost split across each leg, charged
+                           whenever exposure changes; not scaled by the size
+                           of the change.
 
     Returns a dict:
         state       : array, exposure each day — a leverage multiplier under
@@ -126,8 +192,35 @@ def run_backtest(dates, closes, sma_n, buffer,
             target[i] = pos
         state[i] = pos
 
-    strat_ret = np.zeros(n_obs)
-    strat_ret[start_idx + 1:] = state[start_idx:-1] * daily_ret[start_idx + 1:]
+    # Calendar days elapsed since the previous row (see cost-model docstring
+    # above for why this must be actual elapsed days, not a flat 1/row).
+    dt = pd.to_datetime(pd.Series(dates)).values
+    days_elapsed = np.zeros(n_obs)
+    days_elapsed[1:] = (dt[1:] - dt[:-1]).astype("timedelta64[D]").astype(float)
+
+    prev_exposure = np.zeros(n_obs)
+    prev_exposure[1:] = state[:-1]
+
+    factors = np.ones(n_obs)
+    for i in range(1, n_obs):
+        e = prev_exposure[i]
+        if e <= 0:
+            continue
+        ret = daily_ret[i]
+        d = days_elapsed[i]
+        month = str(dates[i - 1])[:7]
+        if dividend_monthly:
+            ret += _monthly(dividend_monthly, month) / 100.0 * d / 365.25
+        base = _monthly(rate_monthly, month) if rate_monthly else 0.0
+        factors[i] = product_factor(e, ret, d, base, pick_product(products, e))
+
+    if slippage_bps_round_trip:
+        changed = np.zeros(n_obs, dtype=bool)
+        changed[1:] = state[1:] != state[:-1]
+        factors[changed] *= (1 - slippage_bps_round_trip / 2 / 10000.0)
+
+    strat_ret = factors - 1.0
+    strat_ret[:start_idx + 1] = 0.0
 
     eval_ret = strat_ret[start_idx + 1:]
     eval_days = n_obs - (start_idx + 1)

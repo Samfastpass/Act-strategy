@@ -121,46 +121,118 @@ window.StrategyEngine = (function () {
     };
   }
 
-  // Equity curve (starting at 1.0 at startIdx), applying leveraged daily
-  // simple returns while in position and staying flat (cash) otherwise.
-  // A day's return is scaled by the leverage state as of the *previous*
-  // day's close (the position you were already holding going into that
-  // day) — never the state computed using that same day's own close.
+  function daysBetween(a, b) { return (new Date(b) - new Date(a)) / (1000 * 60 * 60 * 24); }
+
+  // The single shared compounding core. Used by backtestEquityCurve() below
+  // AND by the S&P Leverage explorer's matrix and performance chart — those
+  // used to each carry their own inline copy of this loop, which is exactly
+  // the kind of duplication that let the leverage bug (see PROJECT_NOTES.md,
+  // the "ratio raised to a power" fix) ship in one place and not another.
+  // One function, one place to audit.
+  //
+  // `exposure[i]` is the ACTUAL leverage/fraction applied on day i — already
+  // resolved (0 when flat, the leverage multiple or sizing fraction when
+  // in). A day's return is scaled by the *previous* day's exposure (the
+  // position already held going into that day), never the same day's own
+  // close — the no-lookahead rule.
+  //
+  // `costs` (all optional, default to zero — so a no-costs call is
+  // byte-identical to the pre-cost-model behavior). The fee/financing maths
+  // itself lives in js/cost-model.js (CostModel.dailyFactor, the WisdomTree
+  // prospectus formula) — this function only feeds it the right inputs:
+  //   products                           — [{ leverage, mgmtFeePct,
+  //                                        dailySwapRatePct, fundingSpreadPct }]
+  //                                        the real products available at each
+  //                                        leverage; a day's exposure is held
+  //                                        via CostModel.pickProduct()
+  //   rateForDate(dateStr) -> pct        — the day's reference short rate
+  //                                        (Fed Funds / SONIA); omit for 0
+  //   dividendYieldForDate(dateStr) -> pct — for PRICE-only series (SPX_MERGED)
+  //                                        whose leveraged products are
+  //                                        total-return: adds yield x D/365.25
+  //                                        to the day's return so dividends
+  //                                        are passed through (x leverage)
+  //   slippageBpsRoundTrip               — one-off cost split across each
+  //                                        leg, charged whenever exposure
+  //                                        actually changes (entry, exit, a
+  //                                        vol-gate ratchet, or a volTarget
+  //                                        rebalance) — not a daily drag, and
+  //                                        not scaled by the size of the
+  //                                        change (a full entry and a partial
+  //                                        ratchet cost the same modelled
+  //                                        slippage; a reasonable
+  //                                        simplification given the tiers
+  //                                        are themselves approximate — see
+  //                                        cost-assumptions.json)
+  //
+  // Costs accrue by calendar days elapsed since the previous row, not once
+  // per row: TER/swap-rate figures are annual rates meant to compound over a
+  // calendar year, and an equity-index asset only has ~252 rows/year, not
+  // 365 — charging once per row would under-charge to ~69% of the stated
+  // annual cost. This is the same bug class as the CAGR row-count fix
+  // (PROJECT_NOTES.md, "Fixed 2026-09-17"), relocated from years-elapsed to
+  // cost-accrual. Bitcoin trades every calendar day, so daysElapsed is
+  // always 1 there and this is a no-op for it.
+  function compoundEquity(prices, exposure, fromIdx, toIdx, costs) {
+    costs = costs || {};
+    var products = costs.products || null;
+    var rateForDate = costs.rateForDate || function () { return 0; };
+    var dividendYieldForDate = costs.dividendYieldForDate || null;
+    var slippageBps = costs.slippageBpsRoundTrip || 0;
+
+    var equity = new Array(toIdx + 1).fill(null);
+    equity[fromIdx] = 1;
+    var ruinedAt = null;
+
+    for (var i = fromIdx + 1; i <= toIdx; i++) {
+      var prevExposure = exposure[i - 1] || 0;
+      // A daily-rebalanced Nx-leveraged position targets N times the day's
+      // *simple* return, not the price ratio raised to the Nth power (that
+      // would compound the whole cumulative return by a power of N, wildly
+      // overstating results). Matches strategy_lib.py's
+      // strat_ret = state[t-1] * daily_ret[t].
+      var simpleRet = prices[i].close / prices[i - 1].close - 1;
+      var daysElapsed = daysBetween(prices[i - 1].date, prices[i].date);
+
+      var factor = 1;
+      if (prevExposure > 0) {
+        if (dividendYieldForDate) simpleRet += dividendYieldForDate(prices[i - 1].date) / 100 * daysElapsed / 365.25;
+        factor = window.CostModel.dailyFactor(
+          prevExposure, simpleRet, daysElapsed, rateForDate(prices[i - 1].date),
+          window.CostModel.pickProduct(products, prevExposure)
+        ).factor;
+      }
+
+      if (exposure[i] !== prevExposure && slippageBps > 0 && equity[i - 1] > 0) {
+        factor *= 1 - slippageBps / 2 / 10000;
+      }
+
+      // Ruin: a loss worse than 1/leverage (now sooner, once costs are
+      // subtracted) wipes the position out entirely — a fund can't go
+      // negative, it closes. Floor at zero, which is absorbing.
+      if (factor <= 0) {
+        if (ruinedAt === null) ruinedAt = prices[i].date;
+        equity[i] = 0;
+      } else {
+        equity[i] = equity[i - 1] <= 0 ? 0 : equity[i - 1] * factor;
+      }
+    }
+
+    var out = [];
+    for (var j = fromIdx; j <= toIdx; j++) out.push({ date: prices[j].date, equity: equity[j] });
+    out.ruinedAt = ruinedAt;
+    return out;
+  }
+
+  // Equity curve (starting at 1.0 at startIdx) for a strategy's own state,
+  // with no costs — the site's Developed-tab strategies aren't cost-modelled
+  // (only the explorer is), so this stays exactly as before.
   function backtestEquityCurve(prices, params) {
     var w = walk(prices, params);
     var n = w.closes.length;
     var firstIdx = w.startIdx;
     if (firstIdx >= n) return [];
-    var equity = new Array(n).fill(null);
-    equity[firstIdx] = 1;
-    var ruinedAt = null;
-    for (var i = firstIdx + 1; i < n; i++) {
-      var prevState = w.state[i - 1] || 0;
-      // A daily-rebalanced Nx-leveraged position targets N times the
-      // day's *simple* return, not the price ratio raised to the Nth
-      // power (that would compound the whole cumulative return by a
-      // power of N, wildly overstating results — the ratio-to-a-power
-      // form is only equivalent to this at leverage 1). Matches
-      // strategy_lib.py's strat_ret = state[t-1] * daily_ret[t].
-      var simpleRet = w.closes[i] / w.closes[i - 1] - 1;
-      var factor = prevState > 0 ? 1 + prevState * simpleRet : 1;
-      // Ruin: a loss worse than 1/leverage wipes the position out entirely
-      // (at 5x, the -20.5% of 1987-10-19 gives factor -0.02). A fund can't
-      // go negative — it closes. Floor at zero, which is absorbing, so
-      // everything after is 0 too. Without this the curve flips sign and
-      // every subsequent number is meaningless.
-      if (factor <= 0) {
-        if (ruinedAt === null) ruinedAt = prices[i].date;
-        equity[i] = 0;
-      } else {
-        equity[i] = equity[i - 1] * factor;
-      }
-    }
-    var out = [];
-    for (var j = firstIdx; j < n; j++) out.push({ date: prices[j].date, equity: equity[j] });
-    // Carried on the array so existing callers that just index it are unaffected.
-    out.ruinedAt = ruinedAt;
-    return out;
+    return compoundEquity(prices, w.state, firstIdx, n - 1, null);
   }
 
   // CAGR % over the trailing `years` (or the whole curve if years is null).
@@ -186,5 +258,8 @@ window.StrategyEngine = (function () {
     return (Math.pow(last.equity / start.equity, 1 / yearsSpan) - 1) * 100;
   }
 
-  return { walk: walk, computeStatus: computeStatus, backtestEquityCurve: backtestEquityCurve, cagr: cagr };
+  return {
+    walk: walk, computeStatus: computeStatus, backtestEquityCurve: backtestEquityCurve,
+    compoundEquity: compoundEquity, cagr: cagr
+  };
 })();

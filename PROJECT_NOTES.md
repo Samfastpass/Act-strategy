@@ -60,12 +60,20 @@ the latter mirrors `js/odds.js`), and `BTC_PARAMS`/`BTC_V2_PARAMS`/
 `SPX_PARAMS`. It's also the intended foundation for the Strategy Explorer
 tab once that's built.
 
-**Caveat**: numpy/pandas aren't installed on the dev machine, so the
-2026-09-09 additions (`vol_target` sizing, `conditional_odds`) and the
-2026-09-17 `years` fix are syntax-checked and desk-checked against the JS
-but have not been executed. The JS side was verified against independent
-from-scratch implementations. Install numpy/pandas and run the Python
-before trusting it as a tiebreaker.
+**Resolved 2026-09-19**: numpy/pandas are now installed and `strategy_lib.py`
+has been run for real for the first time — previously every check was
+desk-checking against the independently-verified JS, never actual
+execution. First run (`SPX_PARAMS`, no costs) reproduced the JS's
+independently-verified 18.51% CAGR / −99.84% max drawdown exactly. The
+cost model was rebuilt on 2026-09-20 (see "Cost model" below) and re-verified
+the same way: JS and Python produce **bit-identical final equity** (relative
+difference 0) on the full 98-year S&P history at 1x/2x/3x/5x, with and
+without costs. `strategy_lib.product_factor` was written from the prospectus
+formula independently of `js/cost-model.js`, so agreement is a real check.
+The 2026-09-09 additions
+(`vol_target` sizing, `conditional_odds`) are still desk-checked only, not
+yet exercised by an actual run — worth doing before trusting them as a
+tiebreaker.
 
 **Fixed 2026-09-17 — the row-count year bug.** `run_backtest` used to set
 `years = eval_days / 365.25`, where `eval_days` counts array *rows*. Rows
@@ -175,12 +183,16 @@ Four `asset` values currently loaded:
   `backtestEquityCurve` in `js/strategy-engine.js`.
 
 ## S&P Leverage explorer tab
-Sweeps the **binary** version of the S&P strategy — in at a fixed leverage,
-out to cash, no vol gate — over a grid of SMA lengths (rows) × symmetric
-buffers (columns), on `SPX_MERGED`. Controls: period · leverage (1/2/3/5x)
-· grid range (broad/zoomed) · colour metric (Calmar default, CAGR
-alternative). Clicking a cell opens `js/price-chart.js`: price, its SMA,
-the buffer band, and in/out drawn as background colour blocks.
+Despite the tab label (kept for now — renaming is cosmetic, not urgent),
+this sweeps the **binary** version of a trend strategy — in at a fixed
+leverage, out to cash, no vol gate — over a grid of SMA lengths (rows) ×
+symmetric buffers (columns), across **five assets**: S&P 500
+(`SPX_MERGED`), Bitcoin (`BTC`), Gold (`GOLD`), Nasdaq 100 (`NASDAQ100`),
+FTSE 100 (`FTSE100`). Controls: asset · period · leverage · grid range ·
+colour metric · slippage tier. Clicking a cell opens `js/price-chart.js`:
+price, its SMA, the buffer band, and in/out drawn as background colour
+blocks, plus `js/perf-chart.js`'s performance/underwater chart and a
+gross-to-net cost breakdown.
 
 **The finding this tab exists to show**: at 5x binary, *17 of 49* combos
 are wiped out by the single −20.5% day of 1987-10-19, and every survivor
@@ -208,10 +220,138 @@ Two things that must not regress:
 - **Partial calendar years** at the window edges are shown as the actual
   part-year return and labelled partial, never annualised into a stub figure.
 
-Free cross-check: the underwater panel's marked worst point and the matrix
-cell's max drawdown are computed by two separate code paths and must agree
-(both read −99.8% at 1941-10-16 for the live combo). If they ever diverge, one
-of them is broken.
+**2026-09-19 consolidation**: the matrix, the performance chart, and the
+Developed tab's equity chart used to each carry their own inline
+equity-compounding loop (three copies of "leverage × return, minus costs,
+floored at ruin"). That duplication is exactly the shape of bug that let the
+leverage fix (above) land in one place and not the others, so all three now
+call one shared core, `StrategyEngine.compoundEquity` — see below. The
+cross-check role that duplication used to serve (two independent
+implementations agreeing) is now served by `strategy_lib.py`, which is
+executed for real, not desk-checked (see the ground-truth section below).
+
+## Cost model (rebuilt 2026-09-20)
+**Read this section before touching costs.** The first version of this model
+(shipped only on an unmerged branch) was wrong, and the way it was wrong is
+worth remembering: it read a fee off a factsheet, treated WisdomTree's daily
+swap rate as a per-unit-of-leverage spread, and left out the Fed Funds
+financing leg and the dividends. The user challenged it three times and then
+supplied the Final Terms, which settled it. Never again state a leveraged
+product's cost from a factsheet figure — derive it from the prospectus
+formula and test it against the product's real price history.
+
+### The formula (`js/cost-model.js`, ~30 lines, deliberately standalone)
+From WisdomTree's Collateralised ETP Securities base prospectus (p.72, p.199):
+
+    P(t) = P(t-1) x (1 + R) x (1 - CA)
+    R    = L x [total return] - (L-1) x (base rate + funding spread) x D/360
+    CA   = mgmt fee x D/360 + daily swap rate x D
+
+`D` is calendar days since the previous row (see below). "Total return"
+means price return + dividend yield x D/365.25 — the products track total
+return, but the explorer's S&P series (`SPX_MERGED`) is a price index, so the
+yield (`SPXDIV` in `reference-rates.json`) is added back and multiplied by
+leverage. This is why the explorer's S&P numbers are now higher at 1x than
+the Developed tab's price-only ones; that is intended, not a bug.
+
+Two products, one expression:
+- **3USL** (index = S&P 500 *Net Total Return*): Fed Funds + a 1.245%
+  Funding Spread on the borrowed (L-1) units.
+- **5USL** (index = S&P 500 Futures *Excess* return, Funding Spread N/A):
+  the excess-return index has already netted one unit of Fed Funds and the
+  stock-borrow leg adds it back, leaving 5 x TR - 4 x Fed Funds - fees — the
+  same expression with spread 0. Its big flat swap rate (0.01736%/day =
+  6.34%/yr) is a per-product negotiated fee, NOT scaled by leverage; AJ Bell's
+  6.95% "ongoing charge" is 0.70 + 0.01736 x 360 and excludes the variable
+  Fed Funds leg, which is why platform figures make 5x look far cheaper than
+  it is (~24%/yr all-in at Fed Funds 3.64%).
+
+### `cost-assumptions.json`
+Per asset, a list of the **real products at each leverage** (1x tracker, 3x,
+5x), with fields named after the Final Terms (`mgmtFeePct`,
+`dailySwapRatePct` — note *per day* —, `fundingSpreadPct`) plus `basisPct`
+(an empirical allowance NOT in any Final Terms). Each field has a
+confidence: `sourced` (printed in a named document), `fitted` (estimated by
+matching real prices, method stated) or `assumed`. An exposure is held via
+the smallest product with leverage >= it (2x uses the 3x product — the
+conservative choice, since no smaller one exists). Only S&P 3x/5x have Final
+Terms; Gold/Nasdaq/FTSE 3x products are marked `assumed`/`fitted` until
+their Final Terms are checked.
+
+### Reference data (`reference-rates.json`)
+Monthly Fed Funds (FRED DFF), SONIA (Bank of England) and S&P dividend yield
+(multpl.com / Shiller), built by `python tools/build_reference_data.py`.
+Static and versioned rather than Supabase rows (the earlier plan) — nothing
+to import by hand, and every point traces to a URL. The site applies a
+month's value to every day in it and holds the first/last value outside the
+range. Regenerate occasionally; Fed Funds moved on 2026-09-17.
+
+### How it was checked against reality (`python tools/check_leveraged_products.py`)
+Drift = (real - model) growth per year; negative means the model is too
+generous.
+- **3USL, Final Terms fields, 13.8 years: +0.3%/yr** (36.5x real vs 35.6x
+  model). Dropping the 1.245% spread gives -2.2%/yr.
+- **5USL, Final Terms literally, 2.3 years: about -3.5% to -4.0%/yr** (2.24x
+  real vs 2.45-2.50x). Dropping financing entirely gives 1.3-3.8x vs 2.24x,
+  so the financing leg is unmistakably real. Precision here is limited: the
+  LSE closes ~11:30 ET (before the US close), ~half the days are indicative
+  zero-volume prices, and there are only 2.3 years.
+- **US-listed SPXL/UPRO/SSO (close with the index, no timing noise), 17
+  years:** slope on S&P TR 2.98/3.00/1.99 (R2 >0.994); drift -1.3/-1.2/-0.6%/yr,
+  i.e. ~0.6% per borrowed unit above Fed Funds. That is the source of the
+  `basisPct: 0.6` allowance on the 5x product (its futures-based index
+  finances above Fed Funds); 0.6 x 4 = 2.4% of the ~3.5-4% 5USL gap. Set it to
+  0 in the UI for the documents-literal model. Their expense ratios in that
+  script are typed from memory, not sourced.
+- Yahoo's London 3x series contain an unadjusted 1-for-20 consolidation and
+  (3USL, 2017-06-26/27) a bad print; the script splices them out.
+  Genuine daily moves are large (5USL moved +37.6% and -30.7% on real days
+  in April 2025), so any "jump" filter must key on near-*exact* split ratios,
+  not size — an earlier version of the script got this wrong.
+
+### Other facts worth keeping
+- The 10% *Restrike Threshold* in the 5USL Final Terms (an index fall of
+  10% from the prior close triggers an intraday rebalance to the worst level)
+  was not triggered in the 5USL sample (worst daily S&P close-to-close fall
+  -6.0%; intraday lows not checked). The explorer does not model it; at 5x a
+  10% index fall is already -50%, so the ruin floor dominates. 3USL's is 20%.
+- Bitcoin has no leveraged retail product (Leverage Shares BTC3 is
+  professional-investors-only): a regulatory wall, not a missing product.
+- Historical caveat: the explorer applies today's products' costs across
+  history (5x S&P back to 1928). Those products did not exist; this is the
+  cost of holding that leverage *today*, applied backwards.
+
+### Slippage, accrual and ruin (unchanged in design)
+- **Slippage** — a one-off cost split across each leg, charged whenever
+  exposure changes; not a daily drag and not scaled by the size of the
+  change. Tiers (low/medium/high) are `assumed` — no measured spreads found.
+- **Costs accrue by calendar days elapsed since the previous row, not once
+  per row.** Annual rates compound over a calendar year; an equity-index
+  asset has ~252 rows/year, so charging per row under-charges to ~69% of the
+  stated cost — the same bug class as the CAGR row-count fix above (caught
+  by the user asking exactly this before it shipped). Verified: a weekday-only
+  260-row asset and a 365-row asset both accrue ~9.4% on a 10%/yr fee, and a
+  Monday factor is 3.0008x a single weekday's in log space. A no-op for BTC.
+- **Ruin gets closer with costs, never further** — a synthetic knife-edge
+  -19.999% day at 5x survives at zero cost and is ruined once ongoing costs
+  are added. In real history this is essentially undetectable (the moves
+  that ruin a 5x fund are ~20% single-day crashes), which is why the
+  synthetic test exists.
+
+## New assets: Gold, Nasdaq 100, FTSE 100 (and their limits)
+Sourced via Twelve Data, same refresh mechanism as BTC/SPY
+(`js/import-tools.js`'s `TWELVEDATA_SYMBOLS`), with a paginated backfill for
+a brand-new asset's first-ever fetch (Twelve Data's free tier caps a single
+request at ~5000 points / ~19 years). Symbols were confirmed against
+Twelve Data's own `/symbol_search` before wiring anything, not guessed:
+- **Gold** → `XAU/USD` (spot).
+- **Nasdaq 100** → `QQQ` (Invesco QQQ Trust, NASDAQ) — a **liquid ETF
+  proxy**, not the raw multi-decade index, so history only reaches back to
+  the ETF's 1999 inception. Materially shorter than `SPX_MERGED`'s 1928+.
+- **FTSE 100** → `S100` (Invesco FTSE 100 UCITS ETF, LSE) — same caveat,
+  ETF inception (~2011), not the raw index.
+This mirrors the project's existing convention (SPY, not raw SPX, is what
+the live S&P strategy actually reads) rather than being a new pattern.
 
 Implementation notes worth keeping:
 - The binary strategy is not new logic — it's the engine's `fixedLeverage`
