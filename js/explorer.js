@@ -24,19 +24,12 @@
 window.Explorer = (function () {
   var fmt = window.App.fmt;
 
-  var ASSETS = [
-    // gate: the vol-gate thresholds offered (annualised vol, %) and the
-    // default. S&P's 22% is the live strategy's; the others are round numbers
-    // around each asset's typical vol, NOT tuned — no live strategy exists.
-    // BTC has no leveraged product, so there is nothing to gate.
-    { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED", live: { sizing: "gated", params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true } },
-      gate: { options: [16, 18, 20, 22, 25, 30], def: 22 } },
-    { key: "BTC", label: "Bitcoin", backtestAsset: "BTC", live: null, gate: null },
-    { key: "GOLD", label: "Gold", backtestAsset: "GOLD", live: null, gate: { options: [10, 12, 15, 18, 22], def: 15 } },
-    { key: "NASDAQ100", label: "Nasdaq 100", backtestAsset: "NASDAQ100", live: null, gate: { options: [18, 22, 26, 30, 35], def: 26 } },
-    { key: "FTSE100", label: "FTSE 100", backtestAsset: "FTSE100", live: null, gate: { options: [12, 14, 16, 18, 22], def: 16 } }
-  ];
-  var VOL_WINDOWS = [10, 20, 30, 60];
+  // What a strategy IS (parameters, validity, walking, scoring) lives in
+  // js/strategy-config.js so the Evaluator tab scores identically. This tab owns
+  // only its own UI state.
+  var SC = window.StrategyConfig;
+  var ASSETS = SC.ASSETS, PARAMS = SC.PARAMS, PARAM_ORDER = SC.PARAM_ORDER;
+  var ALL_LEVERAGES = SC.ALL_LEVERAGES, OUT_LEVERAGES = SC.OUT_LEVERAGES, VOL_WINDOWS = SC.VOL_WINDOWS;
 
   var GRIDS = {
     broad: { smas: [50, 100, 120, 150, 200, 250, 300], buffers: [0, 1, 2, 3, 5, 7.5, 10] },
@@ -60,61 +53,40 @@ window.Explorer = (function () {
     sizing: "gated",
     params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true },
     matrices: [{ x: "buffer", y: "sma" }, { x: "low", y: "high" }],
-    perfMode: "total", annMode: "calendar", slippageTier: "medium",
-    costOverrides: {} // assetKey -> { productLeverage -> { mgmtFeePct, dailySwapRatePct, fundingSpreadPct, basisPct } } once user edits
+    perfMode: "total", annMode: "calendar"
   };
   var curCosts = null;   // the cost config for the asset being rendered (set by renderMain)
   var walkCache = {}; // stamp|sma|buffer|sizing -> { state, sma, startIdx, ... }
   var volCache = {};  // stamp|volLen -> realised-vol series, shared by every cell's walk
   var statsCache = {}; // stamp|period|costs|strategy -> window stats, so re-rendering after a click only recomputes what changed
 
-  function assetConfig(key) { return ASSETS.filter(function (a) { return a.key === key; })[0]; }
+  function assetConfig(key) { return SC.assetConfig(key); }
 
-  // --- design space: parameters, axes, resolving a parameter set ------------
-  var PARAMS = {
-    sma:    { label: "SMA length",       short: "SMA",     gated: false, fmt: function (v) { return v + "d"; }, num: { min: 5, max: 400, step: 5 } },
-    buffer: { label: "Buffer",           short: "Buffer",  gated: false, fmt: function (v) { return v + "%"; }, num: { min: 0, max: 20, step: 0.5 } },
-    high:   { label: "Start leverage",   short: "Start lev", gated: false, fmt: function (v) { return v + "×"; } },
-    low:    { label: "Drop down to",     short: "Drop to", gated: true,  fmt: function (v) { return v + "×"; } },
-    // What is held while the strategy is OUT (below the SMA). 0 = cash, the original behaviour.
-    out:    { label: "Below the SMA",    short: "Below SMA", gated: false, fmt: function (v) { return v === 0 ? "cash" : v + "×"; } },
-    volwin: { label: "Vol window",       short: "Vol win", gated: true,  fmt: function (v) { return v + "d"; }, num: { min: 2, max: 250, step: 5 } },
-    gate:   { label: "Vol gate",         short: "Gate",    gated: true,  fmt: function (v) { return v + "%"; }, num: { min: 1, max: 150, step: 1 } },
-    latch:  { label: "Latch",            short: "Latch",   gated: true,  fmt: function (v) { return v ? "latched" : "unlatched"; } }
-  };
-  var PARAM_ORDER = ["sma", "buffer", "high", "low", "out", "volwin", "gate", "latch"];
-  var OUT_LEVERAGES = [0, 1, 2, 3];
+  // This tab's current strategy as a StrategyConfig descriptor.
+  function curCfg(params) { return { asset: state.asset, sizing: state.sizing, params: params || state.params }; }
+
   var MAX_MATRICES = 3;
   var NEW_MATRIX_DEFAULTS = [{ x: "low", y: "high" }, { x: "volwin", y: "gate" }, { x: "buffer", y: "sma" }];
 
   function parseVal(key, str) { return key === "latch" ? str === "true" : Number(str); }
+  function isGated() { return SC.isGated(curCfg()); }
+  function minAbove(p) { return SC.minAbove(curCfg(p)); }
+  function resolve(p, costs) { return SC.resolve(curCfg(p), costs); }
+  function describeStrategy(p, gs) { return SC.describe(curCfg(p), gs); }
+  function walkFor(prices, assetKey, smaLen, bufferPct, gs, tier) { return SC.walkFor(prices, assetKey, smaLen, bufferPct, gs, tier); }
+  function periodBounds(prices, period) { return SC.periodBounds(prices, period); }
+  function costConfigFor(costAssumptions, assetKey) { return SC.costConfigFor(costAssumptions, assetKey); }
+  function refSeriesFn(refRates, name) { return SC.refSeriesFn(refRates, name); }
+  function engineCostsFrom(cfg, refRates) { return SC.engineCostsFrom(cfg, refRates); }
+  function costVariant(ec, on) { return SC.costVariant(ec, on); }
+  function windowStats(prices, wk, period, leverage, costs) { return SC.windowStats(prices, wk, period, leverage, costs); }
+  function cellStats(env, p) { return SC.evaluate(env, curCfg(p)); }
 
-  // Is the sizing actually vol-gated for this asset?
-  function isGated(asset) { return state.sizing === "gated" && !!asset.gate; }
-
-  // Keeps the shared parameters consistent with the asset and sizing mode
-  // (clamps leverage to what exists, keeps drop-to below start leverage).
+  // Clamps the current strategy to what the asset and sizing mode allow.
   function normalizeParams(asset, costs) {
-    var p = state.params;
-    if (p.high > costs.maxLeverage) p.high = costs.maxLeverage;
-    if (!asset.gate && state.sizing === "gated") state.sizing = "fixed";
-    if (state.sizing === "gated" && p.high > 1) {
-      var lows = ALL_LEVERAGES.filter(function (l) { return l < p.high; });
-      if (lows.indexOf(p.low) < 0) p.low = lows[lows.length - 1];
-    }
-    // What you hold below the SMA must sit below the lowest leverage you hold
-    // above it — otherwise it is not a defensive tier.
-    var ceiling = minAbove(p, asset);
-    if (p.out >= ceiling) {
-      var outs = OUT_LEVERAGES.filter(function (l) { return l < ceiling; });
-      p.out = outs[outs.length - 1];
-    }
-  }
-
-  // The lowest exposure held while the strategy is IN (its drop-to leverage if
-  // vol-gated, otherwise the single leverage).
-  function minAbove(p, asset) {
-    return isGated(asset) && p.high > 1 ? p.low : p.high;
+    var c = curCfg();
+    SC.normalize(c, costs);
+    state.sizing = c.sizing;
   }
 
   // The values an axis shows. The current value is spliced in for free-form
@@ -143,234 +115,10 @@ window.Explorer = (function () {
     return list;
   }
 
-  // Turns a full parameter set into what the walk needs — or says why it can't run.
-  function resolve(p, costs) {
-    var asset = assetConfig(state.asset);
-    if (p.high > costs.maxLeverage) return { invalid: "no real product at " + p.high + "×" };
-    if (p.out >= minAbove(p, asset)) return { invalid: "the leverage held below the SMA (" + PARAMS.out.fmt(p.out) + ") must be lower than the lowest leverage held above it (" + minAbove(p, asset) + "×)" };
-    if (!isGated(asset)) return { gs: { enabled: false } };
-    if (p.high <= 1) return { invalid: "vol gating needs a start leverage above 1×" };
-    if (p.low >= p.high) return { invalid: "drop-to (" + p.low + "×) must be below the start leverage (" + p.high + "×)" };
-    return { gs: { enabled: true, volLen: p.volwin, gatePct: p.gate, gate: p.gate / 100, high: p.high, low: p.low, latch: p.latch } };
-  }
-
   // The gating settings actually in force for the CURRENT strategy.
   function gateSettings() {
     var r = curCosts ? resolve(state.params, curCosts) : { gs: { enabled: false } };
     return r.gs || { enabled: false };
-  }
-
-  function describeStrategy(p, gs) {
-    var base = p.sma + "d SMA / " + p.buffer + "% buffer";
-    var below = p.out > 0 ? " · " + p.out + "× below the SMA" : "";
-    if (gs && gs.enabled) return base + " · " + gs.high + "×→" + gs.low + "× " + (gs.latch ? "latched" : "unlatched") + " · " + gs.volLen + "d vol ≥ " + gs.gatePct + "%" + below;
-    return base + " · " + p.high + "×" + (p.out > 0 ? below : " in/out");
-  }
-
-  function gateLabel(gs) {
-    return gs.high + "×→" + gs.low + "× " + (gs.latch ? "latched" : "unlatched") + " at " + gs.volLen + "d vol ≥ " + gs.gatePct + "%";
-  }
-
-  function paramsFor(smaLen, bufferPct, gs, volSeries) {
-    if (gs && gs.enabled) {
-      return {
-        smaLen: smaLen, buffer: bufferPct / 100,
-        volLen: gs.volLen, volGate: gs.gate, annualization: 252, volSeries: volSeries,
-        // Unlike the binary sweep, the walk here is done AT the real leverages:
-        // when the gate trips the state changes between two non-zero levels, so
-        // the walk (not the caller) decides the exposure.
-        leverage: { base: gs.high, gated: gs.low }, latch: gs.latch,
-        sizing: { mode: "fixedLeverage" }
-      };
-    }
-    return {
-      smaLen: smaLen, buffer: bufferPct / 100,
-      volLen: null, volGate: null, annualization: 252,
-      // Walk at 1x: for a binary strategy the *timing* of in/out doesn't
-      // depend on leverage at all, so one walk serves every leverage setting
-      // and the cache survives flipping between them.
-      leverage: { base: 1, gated: null },
-      sizing: { mode: "fixedLeverage" }
-    };
-  }
-
-  // Caches are keyed on the price series' length and last date, so importing
-  // new days invalidates them instead of serving walks that are one row short.
-  // `tier` = { out, high }: what is held while OUT, and (for a fixed-leverage
-  // walk) the leverage while IN. Neither changes the walk itself, so the cached
-  // walk is shared and `out` is layered on a shallow copy.
-  function walkFor(prices, assetKey, smaLen, bufferPct, gs, tier) {
-    var base = walkBase(prices, assetKey, smaLen, bufferPct, gs);
-    var out = (tier && tier.out) || 0;
-    if (!out) return base;
-    var copy = Object.assign({}, base, { out: out });
-    copy.label = (base.gated ? base.label : tier.high + "× above the SMA") + ", " + out + "× below";
-    return copy;
-  }
-
-  function walkBase(prices, assetKey, smaLen, bufferPct, gs) {
-    var stamp = assetKey + "|" + prices.length + "|" + prices[prices.length - 1].date;
-    var gated = gs && gs.enabled;
-    var key = stamp + "|" + smaLen + "|" + bufferPct + "|"
-      + (gated ? ["g", gs.volLen, gs.gatePct, gs.high, gs.low, gs.latch].join(":") : "f");
-    if (walkCache[key]) return walkCache[key];
-    if (Object.keys(walkCache).length > 600) { walkCache = {}; volCache = {}; }
-
-    var volSeries = null;
-    if (gated) {
-      var vkey = stamp + "|" + gs.volLen;
-      volCache[vkey] = volCache[vkey] || window.StrategyEngine.realizedVol(prices.map(function (p) { return p.close; }), gs.volLen, 252);
-      volSeries = volCache[vkey];
-    }
-    var w = window.StrategyEngine.walk(prices, paramsFor(smaLen, bufferPct, gs, volSeries));
-    walkCache[key] = { state: w.state, sma: w.sma, startIdx: w.startIdx, gated: !!gated,
-                       high: gated ? gs.high : null, low: gated ? gs.low : null, label: gated ? gateLabel(gs) : null };
-    return walkCache[key];
-  }
-
-  function periodBounds(prices, period) {
-    var lo = period.from ? prices.findIndex(function (p) { return p.date >= period.from; }) : 0;
-    if (lo < 0) lo = 0;
-    var hi = prices.length - 1;
-    if (period.to) {
-      for (var i = prices.length - 1; i >= 0; i--) { if (prices[i].date < period.to) { hi = i; break; } }
-    }
-    return { lo: lo, hi: hi };
-  }
-
-  // --- cost config ----------------------------------------------------
-  // cost-assumptions.json lists, per asset, the real products held at each
-  // leverage. Here we (1) overlay any edits the user has typed this session,
-  // and (2) turn that into the plain object StrategyEngine.compoundEquity
-  // wants. The fee/financing maths itself is in js/cost-model.js.
-  var EDITABLE = ["mgmtFeePct", "dailySwapRatePct", "fundingSpreadPct", "basisPct"];
-
-  function productWithEdits(assetKey, p) {
-    var ov = (state.costOverrides[assetKey] || {})[p.leverage] || {};
-    var out = { leverage: p.leverage, name: p.name, isin: p.isin, indexNote: p.indexNote, note: p.note,
-                basisNote: p.basisNote, finalTermsFields: p.finalTermsFields, source: p.source,
-                crossCheck: p.crossCheck, confidence: {} };
-    EDITABLE.forEach(function (f) {
-      out[f] = ov[f] != null ? ov[f] : (p[f] || 0);
-      out.confidence[f] = ov[f] != null ? "edited" : ((p.confidence && p.confidence[f]) || "assumed");
-    });
-    return out;
-  }
-
-  function costConfigFor(costAssumptions, assetKey) {
-    var base = (costAssumptions && costAssumptions[assetKey]) || {};
-    return {
-      maxLeverage: base.maxLeverage != null ? base.maxLeverage : 5,
-      leverageRestriction: base.leverageRestriction || null,
-      products: (base.products || []).map(function (p) { return productWithEdits(assetKey, p); }),
-      financingRateAsset: base.financingRateAsset || null,
-      dividends: base.dividends || { constantPct: 0, confidence: "assumed" },
-      slippageBpsRoundTrip: (base.slippageBpsRoundTrip || { low: 0, medium: 0, high: 0 })[state.slippageTier] || 0,
-      slippageConfidence: base.slippageConfidence || "assumed",
-      slippageNote: base.slippageNote || "",
-      crossChecks: base.crossChecks || []
-    };
-  }
-
-  // Looks a month's value up in a series from reference-rates.json
-  // ([ ["YYYY-MM", value], ... ]), holding the first/last value outside the
-  // covered range. Returns { fn, loaded, earliest, latest, latestValue }.
-  function refSeriesFn(refRates, name) {
-    var ser = refRates && refRates[name] && refRates[name].series;
-    if (!ser || !ser.length) return { fn: function () { return 0; }, loaded: false };
-    var byMonth = {};
-    ser.forEach(function (r) { byMonth[r[0]] = r[1]; });
-    var first = ser[0][1], last = ser[ser.length - 1][1];
-    // The backtest asks for the same month ~21 times running; remember the last
-    // answer so most calls skip the hash lookup.
-    var lastKey = null, lastVal = 0;
-    return {
-      loaded: true, earliest: ser[0][0], latest: ser[ser.length - 1][0], latestValue: last,
-      fn: function (dateStr) {
-        var key = dateStr.slice(0, 7);
-        if (key === lastKey) return lastVal;
-        var v = byMonth[key];
-        if (v == null) v = key < ser[0][0] ? first : last;
-        lastKey = key; lastVal = v;
-        return v;
-      }
-    };
-  }
-
-  // The plain object compoundEquity takes. Products carry funding spread +
-  // empirical basis as one number (that is all the maths needs); the split is
-  // only for display.
-  function engineCostsFrom(cfg, refRates) {
-    var rate = refSeriesFn(refRates, cfg.financingRateAsset);
-    var div = cfg.dividends || {};
-    var yieldFn = div.series ? refSeriesFn(refRates, div.series).fn : (div.constantPct ? function () { return div.constantPct; } : null);
-    return {
-      products: cfg.products.map(function (p) {
-        return { leverage: p.leverage, mgmtFeePct: p.mgmtFeePct, dailySwapRatePct: p.dailySwapRatePct,
-                 fundingSpreadPct: p.fundingSpreadPct + p.basisPct };
-      }),
-      rateForDate: cfg.financingRateAsset ? rate.fn : function () { return 0; },
-      dividendYieldForDate: yieldFn,
-      slippageBpsRoundTrip: cfg.slippageBpsRoundTrip
-    };
-  }
-
-  // A copy of the costs with some components switched off — used by the
-  // gross-to-net breakdown so each step removes exactly one cost.
-  function costVariant(ec, on) {
-    var zero = function () { return 0; };
-    return {
-      products: ec.products.map(function (p) {
-        return { leverage: p.leverage,
-                 mgmtFeePct: on.charges ? p.mgmtFeePct : 0, dailySwapRatePct: on.charges ? p.dailySwapRatePct : 0,
-                 fundingSpreadPct: on.financing ? p.fundingSpreadPct : 0 };
-      }),
-      rateForDate: on.financing ? ec.rateForDate : zero,
-      dividendYieldForDate: on.dividends ? ec.dividendYieldForDate : null,
-      slippageBpsRoundTrip: on.slippage ? ec.slippageBpsRoundTrip : 0
-    };
-  }
-
-  // Compounds the window fresh from 1.0 at its start (capital restarts per
-  // period; the in/out *state* still carries in from before, so there's no
-  // artificial entry on day one). Delegates the actual compounding —
-  // leverage, costs, ruin — to StrategyEngine.compoundEquity, the same core
-  // used everywhere else equity gets computed in this app.
-  function windowStats(prices, wk, period, leverage, costs) {
-    var b = periodBounds(prices, period);
-    var lo = Math.max(b.lo, wk.startIdx), hi = b.hi;
-    if (hi - lo < 2) return { insufficient: true };
-
-    var exposure = new Array(hi + 1);
-    var trades = 0;
-    for (var i = lo; i <= hi; i++) {
-      exposure[i] = window.StrategyEngine.exposureAt(wk, i, leverage);
-      // A trade is a flip of the trend signal (in <-> out), so a strategy that
-      // holds 1x below the SMA still counts its round trips.
-      if (i > lo && (wk.state[i] > 0) !== (wk.state[i - 1] > 0)) trades++;
-    }
-    var curve = window.StrategyEngine.compoundEquity(prices, exposure, lo, hi, costs);
-
-    var last = curve[curve.length - 1];
-    var years = (new Date(prices[hi].date) - new Date(prices[lo].date)) / (1000 * 60 * 60 * 24 * 365.25);
-    if (years <= 0) return { insufficient: true };
-    var cagr = last.equity > 0 ? (Math.pow(last.equity, 1 / years) - 1) * 100 : -100;
-
-    var peak = 1, maxDD = 0;
-    curve.forEach(function (p) {
-      var v = p.equity;
-      if (v > peak) peak = v;
-      var dd = peak > 0 ? v / peak - 1 : -1;
-      if (dd < maxDD) maxDD = dd;
-    });
-
-    return {
-      cagr: cagr, maxDD: maxDD * 100,
-      calmar: maxDD < 0 ? cagr / Math.abs(maxDD * 100) : null,
-      ruined: !!curve.ruinedAt, ruinDate: curve.ruinedAt,
-      years: years, trades: trades, tradesPerYear: trades / years,
-      from: prices[lo].date, to: prices[hi].date
-    };
   }
 
   // --- colour -------------------------------------------------------------
@@ -439,7 +187,7 @@ window.Explorer = (function () {
       + '</div></div>'
       + '<div class="exp-ctl"><label>Slippage tier</label><div class="winbtns">'
       + btnRow(SLIPPAGE_TIERS.map(function (t) { return { label: t.charAt(0).toUpperCase() + t.slice(1), t: t }; }),
-               function (it) { return it.t === state.slippageTier; },
+               function (it) { return it.t === SC.session.slippageTier; },
                function (it) { return 'data-slip="' + it.t + '"'; })
       + '</div></div>'
       + '</div>';
@@ -483,7 +231,9 @@ window.Explorer = (function () {
     }
     return '<div class="param-bar-head"><strong>Current strategy</strong>'
       + '<span class="toolsrow" style="margin:0;">Edit here, or click any matrix cell below to set its two parameters.</span>'
+      + '<button class="winbtn" data-save-cfg="1" title="Save this strategy to the Evaluator tab to compare it across time periods">Save to Evaluator</button>'
       + (asset.live ? '<button class="winbtn" data-reset-live="1" title="Set every parameter to the live strategy">Reset to live strategy</button>' : "")
+      + '<span class="save-msg" id="save-msg"></span>'
       + '</div>'
       + '<div class="param-bar">'
       + sizing
@@ -594,7 +344,7 @@ window.Explorer = (function () {
           + row('Extra financing basis (% a year per borrowed unit)', 'cost-basis', fmt(prod.basisPct, 3), 0.01, prod.confidence.basisPct,
               prod.basisPct ? 'Not in any Final Terms — an empirical allowance; see the note below.' : 'Not in any Final Terms; zero unless evidence says otherwise.')
         : '')
-      + '<div class="cost-row"><label>Slippage, round trip (bps) — ' + state.slippageTier + ' tier</label>'
+      + '<div class="cost-row"><label>Slippage, round trip (bps) — ' + SC.session.slippageTier + ' tier</label>'
       + '<span class="cost-static">' + fmt(cfg.slippageBpsRoundTrip, 0) + ' bps</span> ' + confBadge(cfg.slippageConfidence) + '</div>'
       + '</div>'
       + '<div class="toolsrow">' + costLine + '</div>'
@@ -635,21 +385,6 @@ window.Explorer = (function () {
       + "\n" + fmt(s.tradesPerYear, 1) + " round trips/yr over " + fmt(s.years, 1) + " years";
   }
 
-  // Window stats for one full parameter set, cached — clicking a cell only
-  // changes two parameters, so most cells in the other matrices are new but the
-  // ones sharing all their parameters are reused.
-  function cellStats(env, p) {
-    var r = resolve(p, env.costs);
-    if (r.invalid) return { invalid: r.invalid };
-    var key = env.stamp + "|" + env.periodIdx + "|" + env.costSig + "|"
-      + (r.gs.enabled ? ["g", p.sma, p.buffer, p.volwin, p.gate, p.high, p.low, p.latch, p.out].join(":") : ["f", p.sma, p.buffer, p.high, p.out].join(":"));
-    if (statsCache[key]) return statsCache[key];
-    if (Object.keys(statsCache).length > 4000) statsCache = {};
-    var wk = walkFor(env.prices, env.asset.key, p.sma, p.buffer, r.gs, { out: p.out, high: p.high });
-    statsCache[key] = windowStats(env.prices, wk, env.period, p.high, env.ec);
-    return statsCache[key];
-  }
-
   function metricValue(s) {
     if (!s || s.invalid || s.insufficient || s.ruined) return null;
     return state.metric === "calmar" ? s.calmar : s.cagr;
@@ -659,8 +394,9 @@ window.Explorer = (function () {
   // what fixed sizing uses.)
   function isLiveSet(asset, p) {
     if (!asset.live) return false;
-    var keys = isGated(asset) && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out"];
-    if (isGated(asset) !== (asset.live.sizing === "gated") && keys.length > 3) return false;
+    var gated = isGated();
+    var keys = gated && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out"];
+    if (gated !== (asset.live.sizing === "gated") && keys.length > 3) return false;
     return keys.every(function (k) { return p[k] === asset.live.params[k]; });
   }
 
@@ -792,7 +528,7 @@ window.Explorer = (function () {
     var ec = engineCostsFrom(costs, refRates);
     var period = PERIODS[state.periodIdx];
     var env = {
-      prices: prices, asset: asset, costs: costs, ec: ec, period: period, periodIdx: state.periodIdx,
+      prices: prices, asset: asset, costs: costs, ec: ec, period: period,
       stamp: asset.key + "|" + prices.length + "|" + prices[prices.length - 1].date,
       costSig: JSON.stringify([asset.key, ec.products, ec.slippageBpsRoundTrip])
     };
@@ -846,7 +582,7 @@ window.Explorer = (function () {
     bind("[data-sizing]", function (el) { state.sizing = el.getAttribute("data-sizing"); });
     bind("[data-grid]", function (el) { state.grid = el.getAttribute("data-grid"); });
     bind("[data-metric]", function (el) { state.metric = el.getAttribute("data-metric"); });
-    bind("[data-slip]", function (el) { state.slippageTier = el.getAttribute("data-slip"); });
+    bind("[data-slip]", function (el) { SC.session.slippageTier = el.getAttribute("data-slip"); });
     bind("[data-perf]", function (el) { state.perfMode = el.getAttribute("data-perf"); });
     bind("[data-ann]", function (el) { state.annMode = el.getAttribute("data-ann"); });
     bind("[data-reset-live]", function () {
@@ -855,6 +591,16 @@ window.Explorer = (function () {
       Object.keys(live.params).forEach(function (k) { state.params[k] = live.params[k]; });
       state.sizing = live.sizing;
     });
+    var saveBtn = container.querySelector("[data-save-cfg]");
+    if (saveBtn) saveBtn.addEventListener("click", function () {
+      var msg = container.querySelector("#save-msg");
+      var gs = gateSettings();
+      var res = SC.save(curCfg(), SC.describe(curCfg(), gs));
+      msg.className = "save-msg " + (res.error ? "err" : "ok");
+      msg.textContent = res.error || ("Saved — see the Evaluator tab (" + SC.saved().length + " of " + SC.MAX_SAVED + ").");
+      if (!res.error && window.App.refreshEvaluator) window.App.refreshEvaluator();
+    });
+
     bind("[data-addm]", function () {
       if (state.matrices.length >= MAX_MATRICES) return;
       var used = state.matrices.map(function (m) { return m.x + "/" + m.y; });
@@ -894,7 +640,7 @@ window.Explorer = (function () {
       var input = container.querySelector(pair[0]);
       if (!input || !heldProduct) return;
       input.addEventListener("change", function () {
-        var perAsset = state.costOverrides[state.asset] = state.costOverrides[state.asset] || {};
+        var perAsset = SC.session.costOverrides[state.asset] = SC.session.costOverrides[state.asset] || {};
         var perProduct = perAsset[heldProduct.leverage] = perAsset[heldProduct.leverage] || {};
         perProduct[pair[1]] = Math.max(0, parseFloat(input.value) || 0);
         rerender();

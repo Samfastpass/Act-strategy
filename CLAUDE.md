@@ -118,6 +118,21 @@ Final Terms, and test with `python tools/check_leveraged_products.py`, which
 re-fits the formula to real 3USL/5USL/SPXL/UPRO/SSO prices. PROJECT_NOTES.md's
 "Cost model" section has the results and what they can't resolve.
 
+`js/strategy-config.js` is **what a strategy is**, shared by the Strategy
+Explorer and the Evaluator: the parameter registry, validity rules (`resolve`),
+the walk and its caches, `windowStats`, the cost config, the saved-strategy
+list (localStorage, this browser only), and the session settings both tabs must
+agree on (slippage tier, fee edits). Score a strategy through
+`StrategyConfig.evaluate` — never reimplement the pipeline in a tab.
+`js/evaluator.js` is the Evaluator tab: saved strategies scored across five
+fixed decades plus three longer spans, with a buy & hold benchmark row.
+
+Two rules that came from real bugs there: **cache keys identify what a thing
+is, never its index in some list** (period 0 means "All" on one tab and "2020s"
+on the other — keying on the index served one tab's numbers to the other), and
+**a tab that reads shared session state re-renders when shown**, because
+`switchTab` only toggles `display`.
+
 Position/leverage is encoded **twice** on every chart that shows it —
 colour plus bar height or an explicit label — because green vs amber is a
 hard pair for red-green colour blindness. Don't collapse it to one.
