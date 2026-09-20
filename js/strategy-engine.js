@@ -144,9 +144,13 @@ window.StrategyEngine = (function () {
 
   // The exposure a walk implies on day i. A gated walk (the explorer's
   // vol-gated mode) already holds real leverage multiples in state[]; a binary
-  // walk is 0/1 and is scaled by `leverage`.
+  // walk is 0/1 and is scaled by `leverage`. While the walk is OUT (state 0)
+  // the exposure is wk.out — cash (0) unless the caller asks to hold some
+  // leverage below the SMA. The walk itself never changes: `out` only decides
+  // what is held while it says "out".
   function exposureAt(wk, i, leverage) {
-    return wk.gated ? wk.state[i] : (wk.state[i] > 0 ? leverage : 0);
+    if (!(wk.state[i] > 0)) return wk.out || 0;
+    return wk.gated ? wk.state[i] : leverage;
   }
 
   function daysBetween(a, b) { return (new Date(b) - new Date(a)) / (1000 * 60 * 60 * 24); }

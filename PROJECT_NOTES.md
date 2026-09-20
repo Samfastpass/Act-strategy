@@ -187,12 +187,69 @@ Renamed 2026-09-20 (it has covered five assets and two sizing modes for a
 while). It sweeps a trend strategy over a grid of SMA lengths (rows) ×
 symmetric buffers (columns), across **five assets**: S&P 500 (`SPX_MERGED`),
 Bitcoin (`BTC`), Gold (`GOLD`), Nasdaq 100 (`NASDAQ100`), FTSE 100
-(`FTSE100`). Controls: asset · period · leverage · **sizing** · grid range ·
-colour metric · slippage tier. Clicking a cell opens `js/price-chart.js`:
-price, its SMA, the buffer band, and in/out drawn as background colour
-blocks, plus `js/perf-chart.js`'s performance/underwater chart and a
-gross-to-net cost breakdown. Below the matrix: the costs panel (with the fee
-headline and history chart) and a Data section.
+(`FTSE100`). Sweep settings: asset · period · grid range · colour metric ·
+slippage tier. The strategy itself is the parameter bar (below). Under the
+matrices: `js/price-chart.js` (price, its SMA, the buffer band, in/out as
+background blocks), `js/perf-chart.js`'s performance/underwater chart and a
+gross-to-net cost breakdown — all for the *current strategy*; then the costs
+panel (with the fee headline and history chart) and a Data section.
+
+### Design space: one current strategy, up to three linked matrices (2026-09-20)
+The tab used to be a single hardcoded SMA × buffer grid. It is now a design-
+space explorer built on one idea: **`state.params` is the one current
+strategy** — SMA, buffer, start leverage, drop-to leverage, **below-SMA leverage**,
+vol window, vol gate, latch — edited in the *Current strategy* bar (plus a Fixed / Vol-gated
+sizing switch and a "Reset to live strategy" button, S&P only). Each of up to
+three matrices has its own **X and Y axis chosen from those eight parameters**;
+every parameter a matrix does *not* vary is read from the bar. **Clicking a
+cell writes its two values into the bar**, so the other matrices, the summary
+tiles, the price/performance charts and the costs panel all move to that
+strategy — that is how a selection in one matrix updates the others. Defaults:
+Matrix 1 = SMA × buffer, Matrix 2 = start leverage × drop-to; "+ Add matrix"
+gives vol gate × vol window, then anything.
+- **Any parameter pair works** (SMA × gate, latch × vol window, ...). Picking
+  the other axis's parameter swaps the two. Picking a vol-gate parameter
+  switches sizing to vol-gated; switching back to fixed leaves those matrices
+  showing a one-click "Switch to vol-gated" message rather than wrong numbers.
+- **Below the SMA (added 2026-09-20).** The strategy used to go to cash when out.
+  `out` is the exposure held while OUT — cash (0, the default and the original
+  behaviour), 1×, 2× or 3× — so "5× max, 3× above, 1× below" is start 5×, drop-to
+  3×, below 1×. It is not a new signal: the walk is untouched and still says
+  in/out; `StrategyEngine.exposureAt` returns `wk.out` whenever the walk is out,
+  and the walk's cached result is shared (the tier is layered on a shallow
+  copy). "Out" includes both *below the lower band* and *above the upper band
+  but waiting for vol to calm*, so the tier also covers the vol-gate wait.
+  Rules: it must be strictly below the lowest leverage held above the SMA
+  (drop-to if gated, else the single leverage) or the cell is "—" with a
+  tooltip; the exposure goes through the same product ladder (1× = the
+  unleveraged tracker's fee, 2× = the 3× product), and a change of exposure
+  pays slippage. "Round trips" still counts flips of the trend signal, so a
+  strategy that holds 1× below the SMA reports its round trips rather than 0.
+  Python: `run_backtest(out_leverage=...)`, also covered by
+  `tools/check_js_vs_python.py` (54 configs, 10 of them with a below-SMA tier,
+  zero difference). All-time S&P, net of costs, live 200d/3% 5→3 latched:
+  cash below +18.6% / −88.8%; **1× below +19.5% / −89.9%**; 2× below +15.1% /
+  −98.9%. Fixed 5×: cash +12.5% / −99.8%, 1× below +13.4% / −99.9%. So 1× below
+  adds about a point of CAGR for a slightly deeper drawdown (the 1× leg is
+  exposed to the crashes that happen below the SMA), and 2× below is destructive.
+  An observation on one price path, not a recommendation.
+- **Off-grid values are legal.** Type SMA 210 into the bar and 210d is spliced
+  into every SMA axis so "where am I" stays visible. Free-form fields (SMA,
+  buffer, vol window, gate) validate and snap back on junk.
+- **Invalid combinations are shown, not hidden**: drop-to ≥ start leverage,
+  gating at 1×, or leverage with no real product render as "—" cells with a
+  tooltip saying why (start leverage / drop-to gives a triangle of them).
+- The rings: `is-sel` marks the current strategy's cell in each matrix;
+  `is-live` marks a cell only if it matches the live strategy on every
+  parameter the current sizing mode uses.
+- Every cell is a full parameter set run through the same `walkFor` +
+  `windowStats` path as before, and results are cached per (series, period,
+  costs, parameters) so re-rendering after a click only recomputes cells whose
+  parameters actually changed. Verified against the independent Python
+  research engine to the printed digit: live 5→3 = +18.6% / −88.8%, 5→1 =
+  +17.1% / −88.8%, 250d/4% 5→1 (zoomed grid) = +15.3% / −89.4%.
+- The Broad/Zoomed toggle now applies to every numeric axis that has a fine
+  grid (SMA, buffer, gate).
 
 ### Sizing: fixed leverage vs vol-gated (added 2026-09-20)
 - **Fixed leverage** — in at L, out to cash. The original mode.

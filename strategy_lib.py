@@ -80,7 +80,7 @@ def run_backtest(dates, closes, sma_n, buffer,
                   size_mode="fixed", vol_target=None, max_size=1.0,
                   rebalance_band=0.0,
                   products=None, rate_monthly=None, dividend_monthly=None,
-                  slippage_bps_round_trip=0.0, latch=True):
+                  slippage_bps_round_trip=0.0, latch=True, out_leverage=0.0):
     """
     Run the SMA + buffer trend filter, with an optional volatility overlay
     that either gates leverage or sets position size, over a full price series.
@@ -96,6 +96,12 @@ def run_backtest(dates, closes, sma_n, buffer,
         While invested: if vol rises to >= vol_gate, latch down to
         leverage_low. This is a ONE-WAY ratchet — it does not latch back up
         to leverage_high until the position exits and re-enters fresh.
+        out_leverage — the exposure held while the strategy is OUT (below the
+        lower band, or above the upper band but waiting for vol to calm). The
+        default 0 is cash, the original behaviour; 1.0 keeps you at 1x below
+        the SMA. It is charged through the same product ladder as any other
+        exposure and a change of exposure pays slippage.
+
         latch=False turns the ratchet into a two-way switch: while invested,
         leverage is leverage_low whenever vol >= vol_gate and leverage_high
         whenever it is below, re-evaluated every day.
@@ -205,8 +211,13 @@ def run_backtest(dates, closes, sma_n, buffer,
     days_elapsed = np.zeros(n_obs)
     days_elapsed[1:] = (dt[1:] - dt[:-1]).astype("timedelta64[D]").astype(float)
 
+    # What is actually held each day: the strategy's leverage while IN, the
+    # out-tier while OUT. `state` keeps its 0 = OUT meaning for signal purposes
+    # (trade counts, in/out charts); costs and returns use `exposure`.
+    exposure = np.where(state > 0, state, float(out_leverage))
+    exposure[:start_idx] = 0.0
     prev_exposure = np.zeros(n_obs)
-    prev_exposure[1:] = state[:-1]
+    prev_exposure[1:] = exposure[:-1]
 
     factors = np.ones(n_obs)
     for i in range(1, n_obs):
@@ -223,7 +234,7 @@ def run_backtest(dates, closes, sma_n, buffer,
 
     if slippage_bps_round_trip:
         changed = np.zeros(n_obs, dtype=bool)
-        changed[1:] = state[1:] != state[:-1]
+        changed[1:] = exposure[1:] != exposure[:-1]
         factors[changed] *= (1 - slippage_bps_round_trip / 2 / 10000.0)
 
     strat_ret = factors - 1.0

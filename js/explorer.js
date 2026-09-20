@@ -1,7 +1,13 @@
-// Strategy Explorer (formerly the S&P Leverage explorer) — a general explorer
-// across five assets. Sweeps a trend strategy — in at a leverage, out to cash —
-// across a grid of SMA lengths (rows) and symmetric buffers (columns), with a
-// real, sourced cost model (fees, financing, slippage) applied throughout.
+// Strategy Explorer (formerly the S&P Leverage explorer) — a design-space
+// explorer across five assets.
+//
+// ONE current strategy lives in `state.params` (SMA, buffer, start leverage,
+// drop-to leverage, vol window, vol gate, latch) and is edited in the parameter
+// bar at the top. Up to three matrices sit below it; each has its own X and Y
+// axis chosen from those same parameters, and every OTHER parameter is read
+// from the bar. Clicking a cell writes its two values into the bar, so the
+// other matrices, the summary and the charts all move to that strategy — that
+// is how a selection in one matrix updates the others.
 //
 // Two sizing modes, both just parameters of the engine's existing
 // `fixedLeverage` walk (StrategyEngine.walk), not new logic:
@@ -23,7 +29,8 @@ window.Explorer = (function () {
     // default. S&P's 22% is the live strategy's; the others are round numbers
     // around each asset's typical vol, NOT tuned — no live strategy exists.
     // BTC has no leveraged product, so there is nothing to gate.
-    { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED", live: { sma: 200, buffer: 3 }, gate: { options: [16, 18, 20, 22, 25, 30], def: 22 } },
+    { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED", live: { sizing: "gated", params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true } },
+      gate: { options: [16, 18, 20, 22, 25, 30], def: 22 } },
     { key: "BTC", label: "Bitcoin", backtestAsset: "BTC", live: null, gate: null },
     { key: "GOLD", label: "Gold", backtestAsset: "GOLD", live: null, gate: { options: [10, 12, 15, 18, 22], def: 15 } },
     { key: "NASDAQ100", label: "Nasdaq 100", backtestAsset: "NASDAQ100", live: null, gate: { options: [18, 22, 26, 30, 35], def: 26 } },
@@ -47,27 +54,117 @@ window.Explorer = (function () {
   var ALL_LEVERAGES = [1, 2, 3, 5];
   var SLIPPAGE_TIERS = ["low", "medium", "high"];
 
+  // The single current strategy. Defaults to the live S&P strategy.
   var state = {
-    asset: "SP500", periodIdx: 0, leverage: 5, grid: "broad", metric: "calmar", selected: null,
-    sizing: "fixed", latch: true, volLen: 20, gate: {}, downTo: null, // gate: assetKey -> chosen threshold %
+    asset: "SP500", periodIdx: 0, grid: "broad", metric: "calmar",
+    sizing: "gated",
+    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true },
+    matrices: [{ x: "buffer", y: "sma" }, { x: "low", y: "high" }],
     perfMode: "total", annMode: "calendar", slippageTier: "medium",
     costOverrides: {} // assetKey -> { productLeverage -> { mgmtFeePct, dailySwapRatePct, fundingSpreadPct, basisPct } } once user edits
   };
+  var curCosts = null;   // the cost config for the asset being rendered (set by renderMain)
   var walkCache = {}; // stamp|sma|buffer|sizing -> { state, sma, startIdx, ... }
   var volCache = {};  // stamp|volLen -> realised-vol series, shared by every cell's walk
+  var statsCache = {}; // stamp|period|costs|strategy -> window stats, so re-rendering after a click only recomputes what changed
 
   function assetConfig(key) { return ASSETS.filter(function (a) { return a.key === key; })[0]; }
 
-  // The gating settings actually in force (or { enabled: false }).
-  function gateSettings() {
+  // --- design space: parameters, axes, resolving a parameter set ------------
+  var PARAMS = {
+    sma:    { label: "SMA length",       short: "SMA",     gated: false, fmt: function (v) { return v + "d"; }, num: { min: 5, max: 400, step: 5 } },
+    buffer: { label: "Buffer",           short: "Buffer",  gated: false, fmt: function (v) { return v + "%"; }, num: { min: 0, max: 20, step: 0.5 } },
+    high:   { label: "Start leverage",   short: "Start lev", gated: false, fmt: function (v) { return v + "×"; } },
+    low:    { label: "Drop down to",     short: "Drop to", gated: true,  fmt: function (v) { return v + "×"; } },
+    // What is held while the strategy is OUT (below the SMA). 0 = cash, the original behaviour.
+    out:    { label: "Below the SMA",    short: "Below SMA", gated: false, fmt: function (v) { return v === 0 ? "cash" : v + "×"; } },
+    volwin: { label: "Vol window",       short: "Vol win", gated: true,  fmt: function (v) { return v + "d"; }, num: { min: 2, max: 250, step: 5 } },
+    gate:   { label: "Vol gate",         short: "Gate",    gated: true,  fmt: function (v) { return v + "%"; }, num: { min: 1, max: 150, step: 1 } },
+    latch:  { label: "Latch",            short: "Latch",   gated: true,  fmt: function (v) { return v ? "latched" : "unlatched"; } }
+  };
+  var PARAM_ORDER = ["sma", "buffer", "high", "low", "out", "volwin", "gate", "latch"];
+  var OUT_LEVERAGES = [0, 1, 2, 3];
+  var MAX_MATRICES = 3;
+  var NEW_MATRIX_DEFAULTS = [{ x: "low", y: "high" }, { x: "volwin", y: "gate" }, { x: "buffer", y: "sma" }];
+
+  function parseVal(key, str) { return key === "latch" ? str === "true" : Number(str); }
+
+  // Is the sizing actually vol-gated for this asset?
+  function isGated(asset) { return state.sizing === "gated" && !!asset.gate; }
+
+  // Keeps the shared parameters consistent with the asset and sizing mode
+  // (clamps leverage to what exists, keeps drop-to below start leverage).
+  function normalizeParams(asset, costs) {
+    var p = state.params;
+    if (p.high > costs.maxLeverage) p.high = costs.maxLeverage;
+    if (!asset.gate && state.sizing === "gated") state.sizing = "fixed";
+    if (state.sizing === "gated" && p.high > 1) {
+      var lows = ALL_LEVERAGES.filter(function (l) { return l < p.high; });
+      if (lows.indexOf(p.low) < 0) p.low = lows[lows.length - 1];
+    }
+    // What you hold below the SMA must sit below the lowest leverage you hold
+    // above it — otherwise it is not a defensive tier.
+    var ceiling = minAbove(p, asset);
+    if (p.out >= ceiling) {
+      var outs = OUT_LEVERAGES.filter(function (l) { return l < ceiling; });
+      p.out = outs[outs.length - 1];
+    }
+  }
+
+  // The lowest exposure held while the strategy is IN (its drop-to leverage if
+  // vol-gated, otherwise the single leverage).
+  function minAbove(p, asset) {
+    return isGated(asset) && p.high > 1 ? p.low : p.high;
+  }
+
+  // The values an axis shows. The current value is spliced in for free-form
+  // parameters so "where am I" is always visible in a matrix.
+  function axisValues(key, asset, costs) {
+    var list;
+    if (key === "sma") list = GRIDS[state.grid].smas;
+    else if (key === "buffer") list = GRIDS[state.grid].buffers;
+    else if (key === "high") list = ALL_LEVERAGES.filter(function (l) { return l <= costs.maxLeverage && (!isGated(asset) || l > 1); });
+    else if (key === "low") list = ALL_LEVERAGES.filter(function (l) { return l < costs.maxLeverage; });
+    else if (key === "out") list = OUT_LEVERAGES.filter(function (l) { return l <= costs.maxLeverage; });
+    else if (key === "volwin") list = VOL_WINDOWS;
+    else if (key === "gate") {
+      list = asset.gate ? asset.gate.options : [];
+      if (state.grid === "zoom" && list.length) {
+        var fine = [];
+        for (var v = list[0]; v <= list[list.length - 1]; v += 2) fine.push(v);
+        list = fine;
+      }
+    } else if (key === "latch") list = [true, false];
+    else list = [];
+    var cur = state.params[key];
+    if ((key === "sma" || key === "buffer" || key === "volwin" || key === "gate") && list.length && list.indexOf(cur) < 0) {
+      list = list.concat([cur]).sort(function (a, b) { return a - b; });
+    }
+    return list;
+  }
+
+  // Turns a full parameter set into what the walk needs — or says why it can't run.
+  function resolve(p, costs) {
     var asset = assetConfig(state.asset);
-    if (state.sizing !== "gated" || !asset.gate || state.leverage <= 1) return { enabled: false };
-    var gatePct = state.gate[state.asset] != null ? state.gate[state.asset] : asset.gate.def;
-    var opts = ALL_LEVERAGES.filter(function (l) { return l < state.leverage; });
-    var low = opts.indexOf(state.downTo) >= 0 ? state.downTo : Math.max(1, state.leverage - 2);
-    if (opts.indexOf(low) < 0) low = opts[opts.length - 1];
-    return { enabled: true, volLen: state.volLen, gatePct: gatePct, gate: gatePct / 100,
-             high: state.leverage, low: low, latch: state.latch };
+    if (p.high > costs.maxLeverage) return { invalid: "no real product at " + p.high + "×" };
+    if (p.out >= minAbove(p, asset)) return { invalid: "the leverage held below the SMA (" + PARAMS.out.fmt(p.out) + ") must be lower than the lowest leverage held above it (" + minAbove(p, asset) + "×)" };
+    if (!isGated(asset)) return { gs: { enabled: false } };
+    if (p.high <= 1) return { invalid: "vol gating needs a start leverage above 1×" };
+    if (p.low >= p.high) return { invalid: "drop-to (" + p.low + "×) must be below the start leverage (" + p.high + "×)" };
+    return { gs: { enabled: true, volLen: p.volwin, gatePct: p.gate, gate: p.gate / 100, high: p.high, low: p.low, latch: p.latch } };
+  }
+
+  // The gating settings actually in force for the CURRENT strategy.
+  function gateSettings() {
+    var r = curCosts ? resolve(state.params, curCosts) : { gs: { enabled: false } };
+    return r.gs || { enabled: false };
+  }
+
+  function describeStrategy(p, gs) {
+    var base = p.sma + "d SMA / " + p.buffer + "% buffer";
+    var below = p.out > 0 ? " · " + p.out + "× below the SMA" : "";
+    if (gs && gs.enabled) return base + " · " + gs.high + "×→" + gs.low + "× " + (gs.latch ? "latched" : "unlatched") + " · " + gs.volLen + "d vol ≥ " + gs.gatePct + "%" + below;
+    return base + " · " + p.high + "×" + (p.out > 0 ? below : " in/out");
   }
 
   function gateLabel(gs) {
@@ -99,7 +196,19 @@ window.Explorer = (function () {
 
   // Caches are keyed on the price series' length and last date, so importing
   // new days invalidates them instead of serving walks that are one row short.
-  function walkFor(prices, assetKey, smaLen, bufferPct, gs) {
+  // `tier` = { out, high }: what is held while OUT, and (for a fixed-leverage
+  // walk) the leverage while IN. Neither changes the walk itself, so the cached
+  // walk is shared and `out` is layered on a shallow copy.
+  function walkFor(prices, assetKey, smaLen, bufferPct, gs, tier) {
+    var base = walkBase(prices, assetKey, smaLen, bufferPct, gs);
+    var out = (tier && tier.out) || 0;
+    if (!out) return base;
+    var copy = Object.assign({}, base, { out: out });
+    copy.label = (base.gated ? base.label : tier.high + "× above the SMA") + ", " + out + "× below";
+    return copy;
+  }
+
+  function walkBase(prices, assetKey, smaLen, bufferPct, gs) {
     var stamp = assetKey + "|" + prices.length + "|" + prices[prices.length - 1].date;
     var gated = gs && gs.enabled;
     var key = stamp + "|" + smaLen + "|" + bufferPct + "|"
@@ -236,7 +345,9 @@ window.Explorer = (function () {
     var trades = 0;
     for (var i = lo; i <= hi; i++) {
       exposure[i] = window.StrategyEngine.exposureAt(wk, i, leverage);
-      if (i > lo && (exposure[i] > 0) !== (exposure[i - 1] > 0)) trades++;
+      // A trade is a flip of the trend signal (in <-> out), so a strategy that
+      // holds 1x below the SMA still counts its round trips.
+      if (i > lo && (wk.state[i] > 0) !== (wk.state[i - 1] > 0)) trades++;
     }
     var curve = window.StrategyEngine.compoundEquity(prices, exposure, lo, hi, costs);
 
@@ -275,11 +386,6 @@ window.Explorer = (function () {
     return "cell-" + (value < 0 ? RAMP_NEG[3 - step] : RAMP_POS[step]);
   }
 
-  function metricValue(s) {
-    if (!s || s.insufficient || s.ruined) return null;
-    return state.metric === "calmar" ? s.calmar : s.cagr;
-  }
-
   // --- rendering ----------------------------------------------------------
   function btnRow(items, activeTest, dataAttr, disabledTest) {
     return items.map(function (it) {
@@ -303,49 +409,13 @@ window.Explorer = (function () {
       + (gs.latch
         ? "If vol reaches " + g + " or more while invested it drops to " + gs.low + "× and <strong>stays there until the position exits and re-enters</strong> — a one-way ratchet. The live S&amp;P strategy works this way (20d, 22%, 5×→3×)."
         : "<strong>Unlatched:</strong> while invested it follows vol both ways — " + gs.low + "× whenever vol is " + g + " or more, back to " + gs.high + "× once it falls below.")
+      + (state.params.out > 0 ? " While out (below the SMA, or waiting for vol to calm) it holds <strong>" + state.params.out + "×</strong> instead of cash." : "")
       + " Vol is annualised from daily log returns. Each change of leverage is a trade and pays slippage.";
   }
 
-  function controlsHTML(costs) {
-    var asset = assetConfig(state.asset);
-    var gs = gateSettings();
-    var leverageDisabled = function (l) {
-      if (l <= costs.maxLeverage) return null;
-      return costs.leverageRestriction
-        ? l + "x: " + costs.leverageRestriction
-        : l + "x: no real leveraged product found for " + asset.label + " at this level.";
-    };
-    var gatedNote = "";
-    if (state.sizing === "gated" && !gs.enabled) {
-      gatedNote = '<div class="toolsrow">Vol gating needs leverage above 1× to reduce — ' + (asset.gate ? 'pick 2×, 3× or 5× above.' : asset.label + ' has no leveraged product, so there is nothing to gate.') + ' Showing fixed leverage.</div>';
-    }
-    var gateControls = "";
-    if (gs.enabled) {
-      var lows = ALL_LEVERAGES.filter(function (l) { return l < gs.high; });
-      gateControls = '<div class="exp-controls exp-gate">'
-        + '<div class="exp-ctl"><label>Latch</label><div class="winbtns">'
-        + btnRow([{ label: "Latched (one-way)", v: 1 }, { label: "Unlatched (two-way)", v: 0 }],
-                 function (it) { return (it.v === 1) === gs.latch; },
-                 function (it) { return 'data-latch="' + it.v + '"'; })
-        + '</div></div>'
-        + '<div class="exp-ctl"><label>Vol window</label><div class="winbtns">'
-        + btnRow(VOL_WINDOWS.map(function (w) { return { label: w + "d", w: w }; }),
-                 function (it) { return it.w === gs.volLen; },
-                 function (it) { return 'data-vw="' + it.w + '"'; })
-        + '</div></div>'
-        + '<div class="exp-ctl"><label>Latch down when vol ≥</label><div class="winbtns">'
-        + btnRow(asset.gate.options.map(function (g) { return { label: g + "%", g: g }; }),
-                 function (it) { return it.g === gs.gatePct; },
-                 function (it) { return 'data-gate="' + it.g + '"'; })
-        + '</div></div>'
-        + '<div class="exp-ctl"><label>Down to</label><div class="winbtns">'
-        + btnRow(lows.map(function (l) { return { label: l + "×", l: l }; }),
-                 function (it) { return it.l === gs.low; },
-                 function (it) { return 'data-down="' + it.l + '"'; })
-        + '</div></div>'
-        + '</div>'
-        + '<div class="toolsrow">' + gateSummary(gs) + '</div>';
-    }
+  // Asset / period / grid / colour / slippage — the settings that are about the
+  // sweep, not about the strategy itself.
+  function controlsHTML() {
     return '<div class="exp-controls">'
       + '<div class="exp-ctl"><label>Asset</label><div class="winbtns">'
       + btnRow(ASSETS.map(function (a) { return { label: a.label, key: a.key }; }),
@@ -356,18 +426,6 @@ window.Explorer = (function () {
       + btnRow(PERIODS.map(function (p, i) { return { label: p.label, i: i }; }),
                function (it) { return it.i === state.periodIdx; },
                function (it) { return 'data-period="' + it.i + '"'; })
-      + '</div></div>'
-      + '<div class="exp-ctl"><label>' + (gs.enabled ? "High leverage" : "Leverage") + '</label><div class="winbtns">'
-      + btnRow(ALL_LEVERAGES.map(function (l) { return { label: l + "x", l: l }; }),
-               function (it) { return it.l === state.leverage; },
-               function (it) { return 'data-lev="' + it.l + '"' + (leverageDisabled(it.l) ? " disabled" : ""); },
-               function (it) { return leverageDisabled(it.l); })
-      + '</div></div>'
-      + '<div class="exp-ctl"><label>Sizing</label><div class="winbtns">'
-      + btnRow([{ label: "Fixed leverage", s: "fixed" }, { label: "Vol-gated", s: "gated" }],
-               function (it) { return it.s === state.sizing; },
-               function (it) { return 'data-sizing="' + it.s + '"' + (it.s === "gated" && !asset.gate ? " disabled" : ""); },
-               function (it) { return it.s === "gated" && !asset.gate ? asset.label + " has no leveraged product, so there is no leverage to gate." : null; })
       + '</div></div>'
       + '<div class="exp-ctl"><label>Grid</label><div class="winbtns">'
       + btnRow([{ label: "Broad", g: "broad" }, { label: "Zoomed", g: "zoom" }],
@@ -384,13 +442,65 @@ window.Explorer = (function () {
                function (it) { return it.t === state.slippageTier; },
                function (it) { return 'data-slip="' + it.t + '"'; })
       + '</div></div>'
-      + '</div>' + gatedNote + gateControls;
+      + '</div>';
+  }
+
+  // The current strategy, as editable fields. Anything a matrix does not vary
+  // is read from here; clicking a matrix cell writes into here.
+  function paramBarHTML(costs, gs) {
+    var asset = assetConfig(state.asset), p = state.params, gated = isGated(asset);
+
+    function field(key, inner) {
+      var dim = PARAMS[key].gated && !gated;
+      return '<div class="pb-field' + (dim ? " dim" : "") + '"' + (dim ? ' title="Only used when sizing is vol-gated"' : "") + '>'
+        + '<label>' + PARAMS[key].label + '</label>' + inner + '</div>';
+    }
+    function num(key) {
+      var n = PARAMS[key].num, dis = PARAMS[key].gated && !gated;
+      return '<input type="number" data-param="' + key + '" value="' + p[key] + '" min="' + n.min + '" max="' + n.max + '" step="' + n.step + '"' + (dis ? " disabled" : "") + '>';
+    }
+    function select(key, values, disabledFn) {
+      var dis = PARAMS[key].gated && !gated;
+      return '<select data-param="' + key + '"' + (dis ? " disabled" : "") + '>' + values.map(function (v) {
+        var off = disabledFn && disabledFn(v);
+        return '<option value="' + v + '"' + (v === p[key] ? " selected" : "") + (off ? " disabled" : "") + '>' + PARAMS[key].fmt(v) + (off ? (key === "out" ? " (not below the lowest held above)" : " (no product)") : "") + '</option>';
+      }).join("") + '</select>';
+    }
+
+    var sizing = '<div class="pb-field"><label>Sizing</label><div class="winbtns">'
+      + btnRow([{ label: "Fixed leverage", s: "fixed" }, { label: "Vol-gated", s: "gated" }],
+               function (it) { return it.s === state.sizing; },
+               function (it) { return 'data-sizing="' + it.s + '"' + (it.s === "gated" && !asset.gate ? " disabled" : ""); },
+               function (it) { return it.s === "gated" && !asset.gate ? asset.label + " has no leveraged product, so there is no leverage to gate." : null; })
+      + '</div></div>';
+
+    var lows = ALL_LEVERAGES.filter(function (l) { return l < Math.max(p.high, 2); });
+    var ceil = minAbove(p, asset);
+    var outs = OUT_LEVERAGES.filter(function (l) { return l <= costs.maxLeverage; });
+    var note = "";
+    if (state.sizing === "gated" && !gs.enabled) {
+      note = '<div class="toolsrow">Vol gating needs a start leverage above 1× — ' + (asset.gate ? 'pick 2×, 3× or 5×.' : asset.label + ' has no leveraged product, so there is nothing to gate.') + ' Showing fixed leverage.</div>';
+    }
+    return '<div class="param-bar-head"><strong>Current strategy</strong>'
+      + '<span class="toolsrow" style="margin:0;">Edit here, or click any matrix cell below to set its two parameters.</span>'
+      + (asset.live ? '<button class="winbtn" data-reset-live="1" title="Set every parameter to the live strategy">Reset to live strategy</button>' : "")
+      + '</div>'
+      + '<div class="param-bar">'
+      + sizing
+      + field("sma", num("sma")) + field("buffer", num("buffer"))
+      + field("high", select("high", ALL_LEVERAGES, function (l) { return l > costs.maxLeverage; }))
+      + field("low", select("low", lows))
+      + field("out", select("out", outs, function (l) { return l >= ceil; }))
+      + field("volwin", num("volwin")) + field("gate", num("gate"))
+      + field("latch", select("latch", [true, false]))
+      + '</div>' + note
+      + (gs.enabled ? '<div class="toolsrow">' + gateSummary(gs) + '</div>' : "");
   }
 
   // Headline fee tiles + history chart (js/fee-chart.js), from the same product
   // fields and reference series the backtest uses.
   function feeBoxHTML(cfg, refRates, prices, period, gs) {
-    var L = state.leverage;
+    var L = state.params.high;
     var prod = window.CostModel.pickProduct(cfg.products, L);
     var rate = refSeriesFn(refRates, cfg.financingRateAsset);
     var div = cfg.dividends || {};
@@ -411,7 +521,7 @@ window.Explorer = (function () {
   }
 
   function costsPanelHTML(cfg, refRates, prices, period, gs) {
-    var L = state.leverage;
+    var L = state.params.high;
     var prod = window.CostModel.pickProduct(cfg.products, L);
     var rate = refSeriesFn(refRates, cfg.financingRateAsset);
     var rateNow = cfg.financingRateAsset && rate.loaded ? rate.latestValue : 0;
@@ -508,20 +618,134 @@ window.Explorer = (function () {
       + (state.metric === "calmar"
         ? "Calmar = CAGR ÷ worst drawdown — higher means the return was bought with less pain."
         : "CAGR = compound annual growth rate over the selected period.")
-      + ' Net of the costs above. Ruined combos are excluded from the scale.</span>'
+      + ' Net of costs. Ruined combos are excluded from the scale.</span>'
       + '</div>';
   }
 
-  function cellTitle(sma, buf, s) {
-    if (!s || s.insufficient) return sma + "d / " + buf + "% — not enough history in this period";
+  function cellTitle(desc, s) {
+    if (s.invalid) return desc + " — not runnable: " + s.invalid;
+    if (s.insufficient) return desc + " — not enough history in this period";
     if (s.ruined) {
-      return sma + "d / " + buf + "% — WIPED OUT" + (s.ruinDate ? " on " + s.ruinDate : "")
-        + "\nAt " + state.leverage + "x plus costs, a single bad day destroys the position.";
+      return desc + " — WIPED OUT" + (s.ruinDate ? " on " + s.ruinDate : "")
+        + "\nA single bad day at this leverage, plus costs, destroys the position.";
     }
-    return sma + "d SMA / " + buf + "% buffer (net of costs)"
+    return desc + " (net of costs)"
       + "\nCAGR " + fmt(s.cagr, 1) + "%   max drawdown " + fmt(s.maxDD, 1) + "%"
       + "\nCalmar " + (s.calmar == null ? "—" : fmt(s.calmar, 2))
       + "\n" + fmt(s.tradesPerYear, 1) + " round trips/yr over " + fmt(s.years, 1) + " years";
+  }
+
+  // Window stats for one full parameter set, cached — clicking a cell only
+  // changes two parameters, so most cells in the other matrices are new but the
+  // ones sharing all their parameters are reused.
+  function cellStats(env, p) {
+    var r = resolve(p, env.costs);
+    if (r.invalid) return { invalid: r.invalid };
+    var key = env.stamp + "|" + env.periodIdx + "|" + env.costSig + "|"
+      + (r.gs.enabled ? ["g", p.sma, p.buffer, p.volwin, p.gate, p.high, p.low, p.latch, p.out].join(":") : ["f", p.sma, p.buffer, p.high, p.out].join(":"));
+    if (statsCache[key]) return statsCache[key];
+    if (Object.keys(statsCache).length > 4000) statsCache = {};
+    var wk = walkFor(env.prices, env.asset.key, p.sma, p.buffer, r.gs, { out: p.out, high: p.high });
+    statsCache[key] = windowStats(env.prices, wk, env.period, p.high, env.ec);
+    return statsCache[key];
+  }
+
+  function metricValue(s) {
+    if (!s || s.invalid || s.insufficient || s.ruined) return null;
+    return state.metric === "calmar" ? s.calmar : s.cagr;
+  }
+
+  // Does this parameter set match the live strategy? (Fixed sizing only compares
+  // what fixed sizing uses.)
+  function isLiveSet(asset, p) {
+    if (!asset.live) return false;
+    var keys = isGated(asset) && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out"];
+    if (isGated(asset) !== (asset.live.sizing === "gated") && keys.length > 3) return false;
+    return keys.every(function (k) { return p[k] === asset.live.params[k]; });
+  }
+
+  function axisSelect(idx, axis, current, other) {
+    return '<select data-mx="' + idx + '" data-axis="' + axis + '">'
+      + PARAM_ORDER.map(function (k) {
+        return '<option value="' + k + '"' + (k === current ? " selected" : "") + '>' + PARAMS[k].label + (PARAMS[k].gated ? " (vol-gated)" : "") + '</option>';
+      }).join("") + '</select>';
+  }
+
+  function matrixHTML(idx, m, env) {
+    var asset = env.asset, costs = env.costs;
+    var head = '<div class="mx-head"><strong>Matrix ' + (idx + 1) + '</strong>'
+      + '<label>Y <span class="mx-axis">↓</span>' + axisSelect(idx, "y", m.y, m.x) + '</label>'
+      + '<label>X <span class="mx-axis">→</span>' + axisSelect(idx, "x", m.x, m.y) + '</label>'
+      + (idx > 0 ? '<button class="winbtn" data-rmm="' + idx + '" title="Remove this matrix">✕</button>' : "")
+      + '</div>';
+
+    if ((PARAMS[m.x].gated || PARAMS[m.y].gated) && !isGated(asset)) {
+      return '<div class="matrix-card">' + head + '<div class="toolsrow">This matrix varies a vol-gate parameter, which only applies when sizing is vol-gated. '
+        + (asset.gate ? '<button class="winbtn" data-sizing="gated">Switch to vol-gated</button>' : asset.label + ' has no leveraged product, so there is nothing to gate.') + '</div></div>';
+    }
+    var xs = axisValues(m.x, asset, costs), ys = axisValues(m.y, asset, costs);
+    if (!xs.length || !ys.length) {
+      return '<div class="matrix-card">' + head + '<div class="toolsrow">No values to show on this axis for ' + asset.label + '.</div></div>';
+    }
+
+    var cells = ys.map(function (yv) {
+      return xs.map(function (xv) {
+        var p = Object.assign({}, state.params); p[m.x] = xv; p[m.y] = yv;
+        return { p: p, s: cellStats(env, p) };
+      });
+    });
+    var maxAbs = 0, ruined = 0, total = 0;
+    cells.forEach(function (row) {
+      row.forEach(function (c) {
+        var v = metricValue(c.s);
+        if (v != null && isFinite(v)) maxAbs = Math.max(maxAbs, Math.abs(v));
+        if (!c.s.invalid) { total++; if (c.s.ruined) ruined++; }
+      });
+    });
+
+    var thead = '<tr><th class="corner">' + PARAMS[m.y].short + ' \\ ' + PARAMS[m.x].short + '</th>'
+      + xs.map(function (xv) { return '<th>' + PARAMS[m.x].fmt(xv) + '</th>'; }).join("") + '</tr>';
+    var tbody = ys.map(function (yv, r) {
+      return '<tr><th>' + PARAMS[m.y].fmt(yv) + '</th>' + xs.map(function (xv, c) {
+        var cell = cells[r][c], s = cell.s;
+        var gs = (resolve(cell.p, costs).gs) || { enabled: false };
+        var isSel = state.params[m.x] === xv && state.params[m.y] === yv;
+        var cls, inner;
+        if (s.invalid) { cls = "cell-na"; inner = '<span class="c-main">—</span>'; }
+        else if (s.insufficient) { cls = "cell-na"; inner = '<span class="c-main">—</span>'; }
+        else if (s.ruined) {
+          cls = "cell-ruined";
+          inner = '<span class="c-main">RUINED</span><span class="c-sub">' + (s.ruinDate ? s.ruinDate.slice(0, 4) : "pre-period") + '</span>';
+        } else {
+          cls = rampClass(metricValue(s), maxAbs);
+          inner = '<span class="c-main">' + (s.cagr >= 0 ? "+" : "") + fmt(s.cagr, 1) + '%</span><span class="c-sub">' + fmt(s.maxDD, 1) + '%</span>';
+        }
+        return '<td class="mcell ' + cls + (isLiveSet(asset, cell.p) ? " is-live" : "") + (isSel ? " is-sel" : "") + '"'
+          + (s.invalid ? "" : ' tabindex="0" role="button" data-m="' + idx + '" data-xv="' + xv + '" data-yv="' + yv + '"')
+          + ' title="' + cellTitle(describeStrategy(cell.p, gs), s).replace(/"/g, "&quot;") + '">' + inner + '</td>';
+      }).join("") + '</tr>';
+    }).join("");
+
+    return '<div class="matrix-card">' + head + legendHTML(maxAbs)
+      + '<div class="matrixwrap"><table class="matrix"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>'
+      + '<div class="toolsrow">Each cell: <strong>CAGR</strong> on top, <strong>max drawdown</strong> below. '
+      + (ruined ? '<strong>' + ruined + ' of ' + total + ' were wiped out</strong> (costs included). ' : 'None wiped out. ')
+      + 'Held constant here: ' + PARAM_ORDER.filter(function (k) { return k !== m.x && k !== m.y && (!PARAMS[k].gated || isGated(asset)); })
+        .map(function (k) { return PARAMS[k].short.toLowerCase() + " " + PARAMS[k].fmt(state.params[k]); }).join(", ") + '.</div>'
+      + '</div>';
+  }
+
+  function summaryHTML(s, gs) {
+    function tile(k, v, sub) { return '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + '</div>' + (sub ? '<div class="k" style="margin:3px 0 0;">' + sub + '</div>' : "") + '</div>'; }
+    if (s.invalid) return '<div class="toolsrow">This combination cannot run: ' + s.invalid + '.</div>';
+    if (s.insufficient) return '<div class="toolsrow">Not enough history in this period for the current strategy.</div>';
+    if (s.ruined) return '<div class="statrow"><div class="stat"><div class="k">Result</div><div class="v" style="color:var(--warn)">WIPED OUT' + (s.ruinDate ? " " + s.ruinDate.slice(0, 4) : "") + '</div></div></div>';
+    return '<div class="statrow" style="grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));">'
+      + tile("CAGR (net)", (s.cagr >= 0 ? "+" : "") + fmt(s.cagr, 1) + "%", s.from + " → " + s.to)
+      + tile("Max drawdown", fmt(s.maxDD, 1) + "%")
+      + tile("Calmar", s.calmar == null ? "—" : fmt(s.calmar, 2))
+      + tile("Round trips / yr", fmt(s.tradesPerYear, 1))
+      + '</div>';
   }
 
   // Gross-to-net breakdown for the selected cell only. Each column switches on
@@ -554,91 +778,53 @@ window.Explorer = (function () {
   function renderMain(container, data, costAssumptions, refRates) {
     var asset = assetConfig(state.asset);
     var prices = data[window.App.assetKey(asset.backtestAsset)];
+    var costs = curCosts = costConfigFor(costAssumptions, state.asset);
+    normalizeParams(asset, costs);
+
     if (!prices || !prices.length) {
-      container.innerHTML = '<div class="panel"><h2>Strategy Explorer</h2>'
-        + controlsHTML(costConfigFor(costAssumptions, state.asset))
+      container.innerHTML = '<div class="panel"><h2>Strategy Explorer</h2>' + controlsHTML()
         + '<div class="fatal">No ' + asset.backtestAsset + ' data loaded yet for ' + asset.label
         + '. Use the <strong>Data</strong> section at the bottom of this tab (Twelve Data refresh) to bring in its history.</div></div>';
       wire(container, data, costAssumptions, refRates);
       return;
     }
 
-    var costs = costConfigFor(costAssumptions, state.asset);
-    if (state.leverage > costs.maxLeverage) state.leverage = costs.maxLeverage;
-
     var ec = engineCostsFrom(costs, refRates);
-
-    var gs = gateSettings();
-    var grid = GRIDS[state.grid];
     var period = PERIODS[state.periodIdx];
-
-    var cells = grid.smas.map(function (sma) {
-      return grid.buffers.map(function (buf) {
-        return windowStats(prices, walkFor(prices, asset.key, sma, buf, gs), period, state.leverage, ec);
-      });
-    });
-    var maxAbs = 0;
-    cells.forEach(function (row) {
-      row.forEach(function (s) {
-        var v = metricValue(s);
-        if (v != null && isFinite(v)) maxAbs = Math.max(maxAbs, Math.abs(v));
-      });
-    });
-
-    var head = '<tr><th class="corner">SMA \\ buffer</th>'
-      + grid.buffers.map(function (b) { return '<th>' + b + '%</th>'; }).join("") + '</tr>';
-
-    var body = grid.smas.map(function (sma, r) {
-      return '<tr><th>' + sma + 'd</th>' + grid.buffers.map(function (buf, c) {
-        var s = cells[r][c];
-        var isLive = asset.live && sma === asset.live.sma && buf === asset.live.buffer;
-        var isSel = state.selected && state.selected.asset === asset.key && state.selected.sma === sma && state.selected.buffer === buf;
-        var cls, inner;
-        if (s.insufficient) { cls = "cell-na"; inner = '<span class="c-main">—</span>'; }
-        else if (s.ruined) {
-          cls = "cell-ruined";
-          inner = '<span class="c-main">RUINED</span><span class="c-sub">'
-            + (s.ruinDate ? s.ruinDate.slice(0, 4) : "pre-period") + '</span>';
-        } else {
-          cls = rampClass(metricValue(s), maxAbs);
-          inner = '<span class="c-main">' + (s.cagr >= 0 ? "+" : "") + fmt(s.cagr, 1) + '%</span>'
-            + '<span class="c-sub">' + fmt(s.maxDD, 1) + '%</span>';
-        }
-        return '<td class="mcell ' + cls + (isLive ? " is-live" : "") + (isSel ? " is-sel" : "") + '"'
-          + ' tabindex="0" role="button"'
-          + ' data-sma="' + sma + '" data-buf="' + buf + '"'
-          + ' title="' + cellTitle(sma, buf, s).replace(/"/g, "&quot;") + '">' + inner + '</td>';
-      }).join("") + '</tr>';
-    }).join("");
-
-    var ruinedCount = 0, total = 0;
-    cells.forEach(function (row) { row.forEach(function (s) { total++; if (s.ruined) ruinedCount++; }); });
+    var env = {
+      prices: prices, asset: asset, costs: costs, ec: ec, period: period, periodIdx: state.periodIdx,
+      stamp: asset.key + "|" + prices.length + "|" + prices[prices.length - 1].date,
+      costSig: JSON.stringify([asset.key, ec.products, ec.slippageBpsRoundTrip])
+    };
+    var gs = gateSettings();
+    var cur = cellStats(env, state.params);
 
     var html = '<div class="panel">'
-      + '<h2>Strategy Explorer — ' + asset.label + ', ' + (gs.enabled ? 'vol-gated ' + gs.high + '×→' + gs.low + '× (' + (gs.latch ? 'latched' : 'unlatched') + ')' : 'binary in/out at ' + state.leverage + 'x') + '</h2>'
-      + controlsHTML(costs)
-      + legendHTML(maxAbs)
-      + '<div class="matrixwrap"><table class="matrix"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
-      + '<div class="toolsrow">'
-      + 'Each cell: <strong>CAGR</strong> on top, <strong>max drawdown</strong> below, net of the costs configured below. '
-      + (asset.live ? 'Ringed cell is the live ' + asset.live.sma + 'd/' + asset.live.buffer + '% setting. ' : "")
-      + (ruinedCount
-        ? '<strong>' + ruinedCount + ' of ' + total + ' combos were wiped out at ' + state.leverage + 'x</strong> (costs included). '
-        : 'No combo was wiped out at ' + state.leverage + 'x. ')
-      + 'Backtested on ' + asset.backtestAsset + '. '
-      + 'Each period is compounded fresh from its own start, so RUINED means wiped out <em>inside</em> the selected window; '
-      + 'the in/out signal still carries in from before it, so there is no artificial trade on day one.'
-      + '</div></div>';
+      + '<h2>Strategy Explorer — ' + asset.label + '</h2>'
+      + controlsHTML()
+      + paramBarHTML(costs, gs)
+      + summaryHTML(cur, gs)
+      + '</div>';
+
+    html += '<div class="panel"><h2>Design space</h2>'
+      + '<div class="toolsrow" style="margin-top:0;">Each matrix varies two parameters (choose them with the dropdowns); every other parameter comes from the current strategy above. '
+      + '<strong>Click a cell to make it the current strategy</strong> — the other matrices, the summary and the charts below all update to it. '
+      + (asset.live ? 'The ringed cell is the live strategy. ' : "")
+      + '"Below the SMA" is what you hold while out — cash, or 1×/2×/3× instead. '
+      + 'Backtested on ' + asset.backtestAsset + '. Each period is compounded fresh from its own start, so RUINED means wiped out <em>inside</em> the selected window; the in/out signal still carries in from before it.</div>'
+      + '<div class="matrix-stack">'
+      + state.matrices.map(function (m, i) { return matrixHTML(i, m, env); }).join("")
+      + '</div>'
+      + (state.matrices.length < MAX_MATRICES ? '<button class="winbtn" data-addm="1">+ Add matrix</button>' : "")
+      + '</div>';
 
     html += costsPanelHTML(costs, refRates, prices, period, gs);
 
-    if (state.selected && state.selected.asset === asset.key) {
-      var selWalk = walkFor(prices, asset.key, state.selected.sma, state.selected.buffer, gs);
-      html += window.PriceChart.render(prices, state.selected, state.leverage, period, selWalk);
-      html += costBreakdownHTML(prices, selWalk, period, state.leverage, ec);
-      html += window.PerfChart.render(prices, state.selected, state.leverage, period, selWalk,
-        state.perfMode, state.annMode, ec);
-    }
+    var wk = walkFor(prices, asset.key, state.params.sma, state.params.buffer, gs, { out: state.params.out, high: state.params.high });
+    var sel = { sma: state.params.sma, buffer: state.params.buffer };
+    html += window.PriceChart.render(prices, sel, state.params.high, period, wk);
+    html += costBreakdownHTML(prices, wk, period, state.params.high, ec);
+    html += window.PerfChart.render(prices, sel, state.params.high, period, wk, state.perfMode, state.annMode, ec);
 
     container.innerHTML = html;
     wire(container, data, costAssumptions, refRates);
@@ -653,24 +839,57 @@ window.Explorer = (function () {
     }
     bind("[data-asset]", function (el) {
       state.asset = el.getAttribute("data-asset");
-      state.selected = null;
+      var a = assetConfig(state.asset);
+      if (a.gate) state.params.gate = a.gate.def;    // each asset has its own vol scale
     });
     bind("[data-period]", function (el) { state.periodIdx = Number(el.getAttribute("data-period")); });
-    bind("[data-lev]", function (el) { state.leverage = Number(el.getAttribute("data-lev")); });
     bind("[data-sizing]", function (el) { state.sizing = el.getAttribute("data-sizing"); });
-    bind("[data-latch]", function (el) { state.latch = el.getAttribute("data-latch") === "1"; });
-    bind("[data-vw]", function (el) { state.volLen = Number(el.getAttribute("data-vw")); });
-    bind("[data-gate]", function (el) { state.gate[state.asset] = Number(el.getAttribute("data-gate")); });
-    bind("[data-down]", function (el) { state.downTo = Number(el.getAttribute("data-down")); });
     bind("[data-grid]", function (el) { state.grid = el.getAttribute("data-grid"); });
     bind("[data-metric]", function (el) { state.metric = el.getAttribute("data-metric"); });
     bind("[data-slip]", function (el) { state.slippageTier = el.getAttribute("data-slip"); });
     bind("[data-perf]", function (el) { state.perfMode = el.getAttribute("data-perf"); });
     bind("[data-ann]", function (el) { state.annMode = el.getAttribute("data-ann"); });
+    bind("[data-reset-live]", function () {
+      var live = assetConfig(state.asset).live;
+      if (!live) return;
+      Object.keys(live.params).forEach(function (k) { state.params[k] = live.params[k]; });
+      state.sizing = live.sizing;
+    });
+    bind("[data-addm]", function () {
+      if (state.matrices.length >= MAX_MATRICES) return;
+      var used = state.matrices.map(function (m) { return m.x + "/" + m.y; });
+      var next = NEW_MATRIX_DEFAULTS.filter(function (d) { return used.indexOf(d.x + "/" + d.y) < 0; })[0] || { x: "buffer", y: "sma" };
+      state.matrices.push({ x: next.x, y: next.y });
+    });
+    bind("[data-rmm]", function (el) { state.matrices.splice(Number(el.getAttribute("data-rmm")), 1); });
 
-    // Edits apply to the product held at the selected leverage.
+    // Parameter bar fields.
+    container.querySelectorAll("[data-param]").forEach(function (el) {
+      el.addEventListener("change", function () {
+        var key = el.getAttribute("data-param"), v = parseVal(key, el.value);
+        var n = PARAMS[key].num;
+        if (key !== "latch" && (!isFinite(v) || (n && (v < n.min || v > n.max)))) return rerender(); // reject junk, snap back
+        state.params[key] = v;
+        rerender();
+      });
+    });
+
+    // Matrix axis dropdowns. Picking the other axis's parameter swaps the two;
+    // picking a vol-gate parameter switches sizing to vol-gated (you clearly want it).
+    container.querySelectorAll("[data-mx]").forEach(function (el) {
+      el.addEventListener("change", function () {
+        var m = state.matrices[Number(el.getAttribute("data-mx"))], axis = el.getAttribute("data-axis"), other = axis === "x" ? "y" : "x";
+        var val = el.value;
+        if (val === m[other]) m[other] = m[axis];
+        m[axis] = val;
+        if ((PARAMS[m.x].gated || PARAMS[m.y].gated) && assetConfig(state.asset).gate) state.sizing = "gated";
+        rerender();
+      });
+    });
+
+    // Cost edits apply to the product held at the current start leverage.
     var costCfg = costConfigFor(costAssumptions, state.asset);
-    var heldProduct = window.CostModel.pickProduct(costCfg.products, state.leverage);
+    var heldProduct = window.CostModel.pickProduct(costCfg.products, state.params.high);
     [["#cost-mgmt", "mgmtFeePct"], ["#cost-swap", "dailySwapRatePct"], ["#cost-spread", "fundingSpreadPct"], ["#cost-basis", "basisPct"]].forEach(function (pair) {
       var input = container.querySelector(pair[0]);
       if (!input || !heldProduct) return;
@@ -682,16 +901,18 @@ window.Explorer = (function () {
       });
     });
 
-    container.querySelectorAll(".mcell").forEach(function (cell) {
-      function toggle() {
-        var sma = Number(cell.getAttribute("data-sma")), buf = Number(cell.getAttribute("data-buf"));
-        var same = state.selected && state.selected.asset === state.asset && state.selected.sma === sma && state.selected.buffer === buf;
-        state.selected = same ? null : { asset: state.asset, sma: sma, buffer: buf };
+    // Clicking a matrix cell sets that matrix's two parameters on the current strategy.
+    container.querySelectorAll(".mcell[data-m]").forEach(function (cell) {
+      function pick() {
+        var m = state.matrices[Number(cell.getAttribute("data-m"))];
+        if (!m) return;
+        state.params[m.x] = parseVal(m.x, cell.getAttribute("data-xv"));
+        state.params[m.y] = parseVal(m.y, cell.getAttribute("data-yv"));
         rerender();
       }
-      cell.addEventListener("click", toggle);
+      cell.addEventListener("click", pick);
       cell.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
       });
     });
   }

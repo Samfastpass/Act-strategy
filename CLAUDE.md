@@ -76,7 +76,11 @@ shared. `js/chart.js` (log-scale SVG equity chart) and `js/odds.js`
 (conditional outcome distributions) power the Developed tab's detail
 panel; see PROJECT_NOTES.md for the statistical caveats baked into the
 odds table. `js/explorer.js` is the Strategy Explorer (formerly the S&P Leverage
-explorer) — an SMA × buffer heatmap across five assets (S&P 500 via
+explorer) — a design-space explorer: ONE current strategy (`state.params`,
+edited in a parameter bar, incl. the leverage held BELOW the SMA — cash by
+default — via `StrategyEngine.exposureAt`'s `wk.out`) and up to three matrices
+whose X/Y axes are any two of its parameters, linked because clicking a cell writes back into
+`state.params` — across five assets (S&P 500 via
 `SPX_MERGED`, `BTC`, `GOLD`, `NASDAQ100`, `FTSE100`) in two sizing modes,
 fixed leverage or vol-gated (latched or unlatched; the walk is the engine's
 existing `fixedLeverage` mode plus `params.latch`) — with `js/price-chart.js`

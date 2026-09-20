@@ -138,9 +138,9 @@ window.PriceChart = (function () {
       + (wk.gated
         ? '<span><i class="sw-inblock"></i>In at ' + wk.high + '× (full height)</span><span><i class="sw-downblock"></i>Latched to ' + wk.low + '× (half height)</span>'
         : '<span><i class="sw-inblock"></i>In the market</span>')
-      + '<span class="ch-note">unshaded = out, in cash &middot; log scale</span>'
+      + '<span class="ch-note">' + (wk.out > 0 ? 'unshaded = below the SMA, held at ' + wk.out + '&times;' : 'unshaded = out, in cash') + ' &middot; log scale</span>'
       + '</div>'
-      + '<div class="toolsrow">In the market ' + fmt(pctIn, 0) + '% of this period across ' + episodes + ' episodes'
+      + '<div class="toolsrow">' + (wk.out > 0 ? 'Above the trend signal' : 'In the market') + ' ' + fmt(pctIn, 0) + '% of this period across ' + episodes + ' episodes'
       + (wk.gated ? ', ' + fmt(100 * reducedCount / Math.max(1, inCount), 0) + '% of that time at the reduced ' + wk.low + '×' : '') + '. '
       + 'The strategy buys when price closes above the upper band and sells when it closes below the lower one; '
       + 'between the bands it simply holds whatever it already had.</div>'
