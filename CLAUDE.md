@@ -17,7 +17,10 @@ dependencies beyond a CDN-loaded `@supabase/supabase-js`.
   separate build/publish step.
 - **`tools/`** (dev only, need numpy + internet): `build_reference_data.py`
   regenerates `reference-rates.json`; `check_leveraged_products.py` re-tests
-  the cost formula against real leveraged-product prices.
+  the cost formula against real leveraged-product prices;
+  `check_js_vs_python.py` (also needs Node) runs the site's real JS engine
+  and `strategy_lib.py` on 44 configurations of 98 years of S&P data and
+  requires them to agree to 1e-9 — run it after touching either engine.
 - **`strategy_lib.py`** (the ground-truth reference, below) needs
   `numpy`/`pandas` — installed on this machine as of 2026-09-19
   (`python -m pip install --user numpy pandas`). Run it directly, e.g.
@@ -72,11 +75,15 @@ former, a fraction of capital under the latter — so the equity math is
 shared. `js/chart.js` (log-scale SVG equity chart) and `js/odds.js`
 (conditional outcome distributions) power the Developed tab's detail
 panel; see PROJECT_NOTES.md for the statistical caveats baked into the
-odds table. `js/explorer.js` is the S&P Leverage explorer — an SMA × buffer
-heatmap across five assets (S&P 500 via `SPX_MERGED`, `BTC`, `GOLD`,
-`NASDAQ100`, `FTSE100`) — with `js/price-chart.js` for its price/SMA/
-band/in-out detail chart and `js/perf-chart.js` for its performance +
-underwater chart. PROJECT_NOTES.md records its caching, per-period
+odds table. `js/explorer.js` is the Strategy Explorer (formerly the S&P Leverage
+explorer) — an SMA × buffer heatmap across five assets (S&P 500 via
+`SPX_MERGED`, `BTC`, `GOLD`, `NASDAQ100`, `FTSE100`) in two sizing modes,
+fixed leverage or vol-gated (latched or unlatched; the walk is the engine's
+existing `fixedLeverage` mode plus `params.latch`) — with `js/price-chart.js`
+for its price/SMA/band/in-out detail chart, `js/perf-chart.js` for its
+performance + underwater chart, and `js/fee-chart.js` for the fee headline
+and history chart. It also mounts the Twelve Data refresh (`ImportTools.
+refreshPanelHTML`) in its own `#exp-data` container. PROJECT_NOTES.md records its caching, per-period
 compounding, ruin-on-a-log-axis, and cost-model decisions, which are
 load-bearing rather than incidental.
 

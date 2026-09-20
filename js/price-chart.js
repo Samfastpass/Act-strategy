@@ -24,7 +24,7 @@ window.PriceChart = (function () {
     }
     if (hi - lo < 2) return '<div class="panel"><div class="loading">Not enough history in this period.</div></div>';
 
-    var sma = wk.sma, state = wk.state; // state is 0/1 here (walked at 1x)
+    var sma = wk.sma, state = wk.state; // 0/1 for a binary walk (at 1x); real leverage multiples when wk.gated
 
     // y-range across price and both bands, log scale (a century of prices).
     var minV = Infinity, maxV = -Infinity;
@@ -48,19 +48,32 @@ window.PriceChart = (function () {
     // In/out blocks: merge contiguous in-position runs into rects. Exact and
     // cheap — a century holds hundreds of episodes, not 24,800 — and never
     // downsampled, because the edges are exactly what the chart is for.
-    var blocks = "", runStart = null, inCount = 0, episodes = 0;
-    for (var j = lo; j <= hi; j++) {
-      var inPos = state[j] > 0;
-      if (inPos) inCount++;
-      if (inPos && runStart === null) { runStart = j; episodes++; }
-      if ((!inPos || j === hi) && runStart !== null) {
-        var endIdx = inPos ? j : j - 1;
-        var x0 = x(prices[runStart].date), x1 = x(prices[endIdx].date);
-        blocks += '<rect x="' + x0.toFixed(1) + '" y="' + PAD_T + '" width="' + Math.max(0.5, x1 - x0).toFixed(1)
-          + '" height="' + PLOT_H + '" class="pc-in"/>';
-        runStart = null;
-      }
+    // Level per day: 2 = full leverage, 1 = reduced (a vol-gated strategy
+    // that has latched down), 0 = out. A run of equal, non-zero level becomes
+    // one rect; the reduced level is drawn at half height (amber) so the
+    // difference is not carried by colour alone.
+    function level(j) {
+      if (!(state[j] > 0)) return 0;
+      return wk.gated && state[j] !== wk.high ? 1 : 2;
     }
+    var blocks = "", runStart = null, runLevel = 0, inCount = 0, reducedCount = 0, episodes = 0;
+    function flush(endIdx) {
+      if (runStart === null || runLevel === 0) return;
+      var x0 = x(prices[runStart].date), x1 = x(prices[endIdx].date);
+      var h = runLevel === 2 ? PLOT_H : PLOT_H / 2;
+      blocks += '<rect x="' + x0.toFixed(1) + '" y="' + (PAD_T + PLOT_H - h).toFixed(1) + '" width="' + Math.max(0.5, x1 - x0).toFixed(1)
+        + '" height="' + h.toFixed(1) + '" class="' + (runLevel === 2 ? "pc-in" : "pc-down") + '"/>';
+    }
+    var prevLevel = 0;
+    for (var j = lo; j <= hi; j++) {
+      var lv = level(j);
+      if (lv > 0) inCount++;
+      if (lv === 1) reducedCount++;
+      if (lv > 0 && prevLevel === 0) episodes++;
+      if (lv !== runLevel) { flush(j - 1); runStart = j; runLevel = lv; }
+      prevLevel = lv;
+    }
+    flush(hi);
 
     // Downsample the lines only.
     var stride = Math.max(1, Math.ceil((hi - lo + 1) / MAX_POINTS));
@@ -109,7 +122,7 @@ window.PriceChart = (function () {
     var pctIn = (100 * inCount / (hi - lo + 1));
 
     return '<div class="panel">'
-      + '<div class="detail-head"><h2>' + smaLen + 'd SMA &middot; ' + bufferPct + '% buffer &middot; ' + leverage + 'x &mdash; '
+      + '<div class="detail-head"><h2>' + smaLen + 'd SMA &middot; ' + bufferPct + '% buffer &middot; ' + (wk.label || leverage + 'x') + ' &mdash; '
       + prices[lo].date + ' to ' + prices[hi].date + '</h2></div>'
       + '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" preserveAspectRatio="xMidYMid meet" role="img"'
       + ' aria-label="S&amp;P price with ' + smaLen + ' day moving average, ' + bufferPct + ' percent buffer bands, and shaded in-position periods">'
@@ -122,10 +135,13 @@ window.PriceChart = (function () {
       + '<span><i class="sw-price"></i>Price</span>'
       + '<span><i class="sw-sma"></i>' + smaLen + 'd SMA</span>'
       + (buffer > 0 ? '<span><i class="sw-band"></i>&plusmn;' + bufferPct + '% buffer</span>' : '')
-      + '<span><i class="sw-inblock"></i>In the market</span>'
+      + (wk.gated
+        ? '<span><i class="sw-inblock"></i>In at ' + wk.high + '× (full height)</span><span><i class="sw-downblock"></i>Latched to ' + wk.low + '× (half height)</span>'
+        : '<span><i class="sw-inblock"></i>In the market</span>')
       + '<span class="ch-note">unshaded = out, in cash &middot; log scale</span>'
       + '</div>'
-      + '<div class="toolsrow">In the market ' + fmt(pctIn, 0) + '% of this period across ' + episodes + ' episodes. '
+      + '<div class="toolsrow">In the market ' + fmt(pctIn, 0) + '% of this period across ' + episodes + ' episodes'
+      + (wk.gated ? ', ' + fmt(100 * reducedCount / Math.max(1, inCount), 0) + '% of that time at the reduced ' + wk.low + '×' : '') + '. '
       + 'The strategy buys when price closes above the upper band and sells when it closes below the lower one; '
       + 'between the bands it simply holds whatever it already had.</div>'
       + '</div>';

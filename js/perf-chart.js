@@ -33,7 +33,7 @@ window.PerfChart = (function () {
   // one-off independent verification, not a second production code path.)
   function buildSeries(prices, wk, leverage, lo, hi, costs) {
     var exposure = new Array(hi + 1);
-    for (var i = lo; i <= hi; i++) exposure[i] = wk.state[i] > 0 ? leverage : 0;
+    for (var i = lo; i <= hi; i++) exposure[i] = window.StrategyEngine.exposureAt(wk, i, leverage);
     var curve = window.StrategyEngine.compoundEquity(prices, exposure, lo, hi, costs || null);
 
     var base = prices[lo].close;
@@ -120,6 +120,7 @@ window.PerfChart = (function () {
 
   // --- rendering ----------------------------------------------------------
   function render(prices, selected, leverage, period, wk, mode, annMode, costs) {
+    var levText = wk.label || (leverage + '×');
     var lo = period.from ? prices.findIndex(function (p) { return p.date >= period.from; }) : 0;
     if (lo < 0) lo = 0;
     lo = Math.max(lo, wk.startIdx);
@@ -183,7 +184,7 @@ window.PerfChart = (function () {
         svg += '<line x1="' + rx.toFixed(1) + '" y1="' + PAD_T + '" x2="' + rx.toFixed(1) + '" y2="' + (PAD_T + MAIN_H) + '" class="pf-ruinline"/>'
           + '<text x="' + Math.min(rx + 5, W - PAD_R - 90).toFixed(1) + '" y="' + (PAD_T + 12) + '" class="pf-ruintext">wiped out ' + ruinDate + '</text>';
       }
-      legend = '<span><i class="sw-strat"></i>Strategy at ' + leverage + '× <b>' + (pts[pts.length - 1].eq > 0 ? fmt(pts[pts.length - 1].eq, 2) + '×' : '0 — wiped out') + '</b></span>'
+      legend = '<span><i class="sw-strat"></i>Strategy at ' + levText + ' <b>' + (pts[pts.length - 1].eq > 0 ? fmt(pts[pts.length - 1].eq, 2) + '×' : '0 — wiped out') + '</b></span>'
         + '<span><i class="sw-hold"></i>Buy &amp; hold (1×) <b>' + fmt(pts[pts.length - 1].hold, 2) + '×</b></span>'
         + '<span class="ch-note">log scale, rebased to 1× at ' + pts[0].date + '</span>';
       note = 'Total growth of £1, net of the costs configured on this tab. Buy &amp; hold is shown unleveraged and cost-free (dividends reinvested) for reference, so the gap is what the leverage, its costs, and the timing did together.';
@@ -288,7 +289,7 @@ window.PerfChart = (function () {
       : 'Never regained its previous peak within this period.';
 
     return '<div class="panel">'
-      + '<div class="detail-head"><h2>Performance (net of costs) &mdash; ' + selected.sma + 'd / ' + selected.buffer + '% at ' + leverage + '×</h2>'
+      + '<div class="detail-head"><h2>Performance (net of costs) &mdash; ' + selected.sma + 'd / ' + selected.buffer + '% at ' + levText + '</h2>'
       + '<div class="winbtns">'
       + '<button class="winbtn' + (mode === "total" ? " active" : "") + '" data-perf="total">Total return</button>'
       + '<button class="winbtn' + (mode === "ann" ? " active" : "") + '" data-perf="ann">Annualised</button>'

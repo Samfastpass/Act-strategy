@@ -80,7 +80,7 @@ def run_backtest(dates, closes, sma_n, buffer,
                   size_mode="fixed", vol_target=None, max_size=1.0,
                   rebalance_band=0.0,
                   products=None, rate_monthly=None, dividend_monthly=None,
-                  slippage_bps_round_trip=0.0):
+                  slippage_bps_round_trip=0.0, latch=True):
     """
     Run the SMA + buffer trend filter, with an optional volatility overlay
     that either gates leverage or sets position size, over a full price series.
@@ -96,6 +96,9 @@ def run_backtest(dates, closes, sma_n, buffer,
         While invested: if vol rises to >= vol_gate, latch down to
         leverage_low. This is a ONE-WAY ratchet — it does not latch back up
         to leverage_high until the position exits and re-enters fresh.
+        latch=False turns the ratchet into a two-way switch: while invested,
+        leverage is leverage_low whenever vol >= vol_gate and leverage_high
+        whenever it is below, re-evaluated every day.
         Exit is price-only (crossing below `lower`), regardless of vol.
 
     size_mode="vol_target" — continuous volatility targeting:
@@ -187,8 +190,12 @@ def run_backtest(dates, closes, sma_n, buffer,
             else:
                 if closes[i] < lower:
                     pos = 0.0
-                elif vol_gate is not None and pos == leverage_high and v is not None and v >= vol_gate:
-                    pos = leverage_low
+                elif vol_gate is not None and v is not None:
+                    if latch:
+                        if pos == leverage_high and v >= vol_gate:
+                            pos = leverage_low
+                    else:
+                        pos = leverage_low if v >= vol_gate else leverage_high
             target[i] = pos
         state[i] = pos
 

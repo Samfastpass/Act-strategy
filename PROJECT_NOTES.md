@@ -182,26 +182,92 @@ Four `asset` values currently loaded:
   came out ~35-90% instead of the correct ~24-67%. See
   `backtestEquityCurve` in `js/strategy-engine.js`.
 
-## S&P Leverage explorer tab
-Despite the tab label (kept for now — renaming is cosmetic, not urgent),
-this sweeps the **binary** version of a trend strategy — in at a fixed
-leverage, out to cash, no vol gate — over a grid of SMA lengths (rows) ×
-symmetric buffers (columns), across **five assets**: S&P 500
-(`SPX_MERGED`), Bitcoin (`BTC`), Gold (`GOLD`), Nasdaq 100 (`NASDAQ100`),
-FTSE 100 (`FTSE100`). Controls: asset · period · leverage · grid range ·
+## Strategy Explorer tab (formerly "S&P Leverage explorer")
+Renamed 2026-09-20 (it has covered five assets and two sizing modes for a
+while). It sweeps a trend strategy over a grid of SMA lengths (rows) ×
+symmetric buffers (columns), across **five assets**: S&P 500 (`SPX_MERGED`),
+Bitcoin (`BTC`), Gold (`GOLD`), Nasdaq 100 (`NASDAQ100`), FTSE 100
+(`FTSE100`). Controls: asset · period · leverage · **sizing** · grid range ·
 colour metric · slippage tier. Clicking a cell opens `js/price-chart.js`:
 price, its SMA, the buffer band, and in/out drawn as background colour
 blocks, plus `js/perf-chart.js`'s performance/underwater chart and a
-gross-to-net cost breakdown.
+gross-to-net cost breakdown. Below the matrix: the costs panel (with the fee
+headline and history chart) and a Data section.
+
+### Sizing: fixed leverage vs vol-gated (added 2026-09-20)
+- **Fixed leverage** — in at L, out to cash. The original mode.
+- **Vol-gated** — enter at the *high* leverage only while realised vol is
+  below a gate; when vol reaches the gate, drop to a *lower* leverage.
+  Controls: **latch** (latched / unlatched), **vol window** (10/20/30/60
+  days), **gate** (per-asset presets), **down to** (any leverage below the
+  high). Defaults are the live S&P strategy's: 20d, 22%, 5×→3×, latched.
+  - **Latched** (default) is the one-way ratchet the live strategy uses:
+    once vol has spiked, stay at the lower leverage until the position
+    *exits* and re-enters fresh. **Unlatched** re-evaluates every day:
+    lower leverage whenever vol ≥ gate, back to the high leverage when it
+    falls below. The entry rule is the same in both: no entry while vol ≥
+    gate (it waits, out of the market).
+  - It is not new logic: it is the engine's existing `fixedLeverage` walk
+    with `volGate` set, plus a `latch` parameter (`params.latch`, default
+    true; Python `run_backtest(latch=True)`). Because the state now moves
+    between two *non-zero* levels, gated walks are done at the real
+    leverages and the walk's `state` is used directly as exposure
+    (`StrategyEngine.exposureAt`); binary walks are still done once at 1×
+    and scaled. Every change of leverage is a trade and pays slippage.
+  - Vol is annualised sample stdev of daily log returns; the 252-day
+    annualisation is used for every asset (Bitcoin has nothing to gate).
+    `StrategyEngine.realizedVol` computes it once per (asset, window) and
+    every matrix cell's walk shares it via `params.volSeries`.
+  - Sanity anchor: gated S&P, 200d/3%, 20d/22%, 5×→3×, latched, *no costs,
+    price-only* gives 24.3% CAGR and −87.5% max drawdown in the UI, matching
+    the figures verified for the live strategy long before this mode existed.
+  - Gate presets other than S&P's 22% are round numbers around each asset's
+    typical vol, NOT tuned. The 2× product is held via the 3× (see Cost model).
+  - Price chart: full-height green = at the high leverage, half-height amber
+    = latched to the lower one (height as well as colour, per the project's
+    colour-blindness rule).
+  - Observed on the S&P (with costs, 200d/3%): latching matters a lot —
+    latched finished ~4x above unlatched over the full history, because the
+    ratchet stays defensive through post-crash rallies. Treat as a finding to
+    investigate, not a conclusion.
+
+### Fees: headline and history (js/fee-chart.js)
+The costs panel opens with tiles — all-in cost **now** (at the latest Fed
+Funds/SONIA month), its fee and financing parts, the average over the
+selected period and the peak month — and a chart of the approximated all-in
+annual cost by month (fees flat, financing following the rate), with dividends
+received (yield × leverage) as a dashed line and, for a vol-gated strategy, the
+lower leverage's cost as a second line. It uses `CostModel.annualDrag` on the
+same product fields and reference series the backtest uses, so it cannot
+disagree with the matrix, and it redraws when a field is edited. The platform-
+quoted "ongoing charge" (fee + swap × 360) is shown next to the true all-in
+figure because the gap between them is the financing (~17%/yr at 5× today).
+Months before the rate series begins (before 1954 for Fed Funds) are shaded
+and labelled "rate held at … level" — a flat stretch there is not data.
+
+### Data section (auto import)
+The explorer tab has a "Data — auto import" panel: a per-asset table (rows,
+first/latest date, days behind) plus the same Twelve Data refresh as the
+Developed tab (`ImportTools.refreshPanelHTML()`; the CSV drop stays
+Developed-only — `wireUp` wires whichever panel is present). It is mounted
+in its own container (`#exp-data`), separate from `#exp-main`, so a
+half-finished import preview survives clicking around the explorer. The key
+stays in this browser's localStorage as before. Reference data (fees,
+rates, dividends) is static and is not touched by it.
+
+### Performance / caches
+`compoundEquity` was the hot spot (a 7×7 matrix is 49 curves over ~25,000
+rows): it now takes day numbers from a per-series cache (`dayNumbers`, a
+WeakMap) instead of parsing two date strings per row, and calls the
+allocation-free `CostModel.dailyGrowth`. Walk and vol caches are keyed on the
+series length and last date, so importing new days can no longer serve walks
+one row short (a latent bug in the earlier `asset|sma|buffer` key).
 
 **The finding this tab exists to show**: at 5x binary, *17 of 49* combos
 are wiped out by the single −20.5% day of 1987-10-19, and every survivor
 still carries a −98% to −99.9% drawdown. At 3x nothing is wiped out. So
 what makes the live 5x strategy survivable is **the vol gate**, not the
 choice of SMA or buffer — the gate had ratcheted it down before 1987.
-
-Clicking a cell opens two charts: `js/price-chart.js` (price, SMA, buffer band,
-in/out blocks) and `js/perf-chart.js` (performance + underwater).
 
 `js/perf-chart.js` stacks a mode-switchable top plot over an always-present
 **underwater panel** (`equity/runningPeak − 1`, filled downward, deepest point

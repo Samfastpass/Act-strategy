@@ -10,6 +10,26 @@
 // ratchet.
 window.StrategyEngine = (function () {
 
+  // Annualized realized vol from the trailing volLen daily log returns
+  // (sample stdev, ddof=1) — matches strategy_lib.realized_vol. null until
+  // volLen returns exist.
+  function realizedVol(closes, volLen, annualization) {
+    var n = closes.length;
+    var vol = new Array(n).fill(null);
+    var logret = new Array(n).fill(0);
+    for (var i2 = 1; i2 < n; i2++) logret[i2] = Math.log(closes[i2] / closes[i2 - 1]);
+    for (var i3 = volLen; i3 < n; i3++) {
+      var mean = 0;
+      for (var k = i3 - volLen + 1; k <= i3; k++) mean += logret[k];
+      mean /= volLen;
+      var vv = 0;
+      for (var k2 = i3 - volLen + 1; k2 <= i3; k2++) vv += (logret[k2] - mean) * (logret[k2] - mean);
+      vv /= (volLen - 1);
+      vol[i3] = Math.sqrt(vv) * Math.sqrt(annualization);
+    }
+    return vol;
+  }
+
   // Walks full price history once, computing the rolling SMA, the
   // (optional) realized-vol series, and the state (0 = flat, otherwise the
   // currently-applied leverage multiple) at every day. Shared by
@@ -25,6 +45,9 @@ window.StrategyEngine = (function () {
     var annualization = params.annualization || 252;
     var lev = params.leverage || { base: 1, gated: null };
     var sizing = params.sizing || { mode: "fixedLeverage" };
+    // Only matters when a vol gate reduces leverage; default is the original
+    // one-way ratchet (params.latch === false makes it re-lever when vol calms).
+    var latched = params.latch !== false;
     // Vol feeds either the gate (fixedLeverage) or the position size
     // (volTarget), so it's needed whenever volLen is set and something uses it.
     var needsVol = !!volLen && (volGate != null || sizing.mode === "volTarget");
@@ -37,20 +60,9 @@ window.StrategyEngine = (function () {
       if (i >= smaLen - 1) sma[i] = sum / smaLen;
     }
 
-    var vol = new Array(n).fill(null);
-    if (needsVol) {
-      var logret = new Array(n).fill(0);
-      for (var i2 = 1; i2 < n; i2++) logret[i2] = Math.log(closes[i2] / closes[i2 - 1]);
-      for (var i3 = volLen; i3 < n; i3++) {
-        var mean = 0;
-        for (var k = i3 - volLen + 1; k <= i3; k++) mean += logret[k];
-        mean /= volLen;
-        var vv = 0;
-        for (var k2 = i3 - volLen + 1; k2 <= i3; k2++) vv += (logret[k2] - mean) * (logret[k2] - mean);
-        vv /= (volLen - 1);
-        vol[i3] = Math.sqrt(vv) * Math.sqrt(annualization);
-      }
-    }
+    // A caller sweeping many walks over the same prices (the explorer's matrix)
+    // can precompute the vol series once and pass it in as params.volSeries.
+    var vol = needsVol ? (params.volSeries || realizedVol(closes, volLen, annualization)) : new Array(n).fill(null);
 
     // Matches strategy_lib.py's start_idx: when vol is in play, the walk
     // can't start until both the SMA *and* the vol window are available.
@@ -82,7 +94,16 @@ window.StrategyEngine = (function () {
           if (closes[i4] > upper && volOk) cur = lev.base;
         } else {
           if (closes[i4] < lower) cur = 0;
-          else if (lev.gated != null && cur === lev.base && volGate != null && v !== null && v >= volGate) cur = lev.gated;
+          else if (lev.gated != null && volGate != null && v !== null) {
+            if (latched) {
+              // One-way ratchet: once vol has spiked, stay at the reduced
+              // leverage until the position exits and re-enters fresh.
+              if (cur === lev.base && v >= volGate) cur = lev.gated;
+            } else {
+              // Unlatched: leverage follows vol both ways, day by day.
+              cur = v >= volGate ? lev.gated : lev.base;
+            }
+          }
         }
         target[i4] = cur;
       }
@@ -121,7 +142,31 @@ window.StrategyEngine = (function () {
     };
   }
 
+  // The exposure a walk implies on day i. A gated walk (the explorer's
+  // vol-gated mode) already holds real leverage multiples in state[]; a binary
+  // walk is 0/1 and is scaled by `leverage`.
+  function exposureAt(wk, i, leverage) {
+    return wk.gated ? wk.state[i] : (wk.state[i] > 0 ? leverage : 0);
+  }
+
   function daysBetween(a, b) { return (new Date(b) - new Date(a)) / (1000 * 60 * 60 * 24); }
+
+  // Day numbers (UTC days since the epoch) for a price series, computed once
+  // per series. compoundEquity needs the calendar gap between every pair of
+  // rows; parsing two date strings per row per call made the explorer's 49-cell
+  // matrix several times slower than it needed to be.
+  var dayNumCache = new WeakMap();
+  function dayNumbers(prices) {
+    var hit = dayNumCache.get(prices);
+    if (hit && hit.n === prices.length && hit.last === prices[prices.length - 1].date) return hit.days;
+    var days = new Array(prices.length);
+    for (var i = 0; i < prices.length; i++) {
+      var d = prices[i].date;
+      days[i] = Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) / 86400000;
+    }
+    dayNumCache.set(prices, { n: prices.length, last: prices[prices.length - 1].date, days: days });
+    return days;
+  }
 
   // The single shared compounding core. Used by backtestEquityCurve() below
   // AND by the S&P Leverage explorer's matrix and performance chart — those
@@ -138,7 +183,7 @@ window.StrategyEngine = (function () {
   //
   // `costs` (all optional, default to zero — so a no-costs call is
   // byte-identical to the pre-cost-model behavior). The fee/financing maths
-  // itself lives in js/cost-model.js (CostModel.dailyFactor, the WisdomTree
+  // itself lives in js/cost-model.js (CostModel.dailyGrowth, the WisdomTree
   // prospectus formula) — this function only feeds it the right inputs:
   //   products                           — [{ leverage, mgmtFeePct,
   //                                        dailySwapRatePct, fundingSpreadPct }]
@@ -180,6 +225,7 @@ window.StrategyEngine = (function () {
     var dividendYieldForDate = costs.dividendYieldForDate || null;
     var slippageBps = costs.slippageBpsRoundTrip || 0;
 
+    var dayNums = dayNumbers(prices);
     var equity = new Array(toIdx + 1).fill(null);
     equity[fromIdx] = 1;
     var ruinedAt = null;
@@ -192,15 +238,15 @@ window.StrategyEngine = (function () {
       // overstating results). Matches strategy_lib.py's
       // strat_ret = state[t-1] * daily_ret[t].
       var simpleRet = prices[i].close / prices[i - 1].close - 1;
-      var daysElapsed = daysBetween(prices[i - 1].date, prices[i].date);
+      var daysElapsed = dayNums[i] - dayNums[i - 1];
 
       var factor = 1;
       if (prevExposure > 0) {
         if (dividendYieldForDate) simpleRet += dividendYieldForDate(prices[i - 1].date) / 100 * daysElapsed / 365.25;
-        factor = window.CostModel.dailyFactor(
+        factor = window.CostModel.dailyGrowth(
           prevExposure, simpleRet, daysElapsed, rateForDate(prices[i - 1].date),
           window.CostModel.pickProduct(products, prevExposure)
-        ).factor;
+        );
       }
 
       if (exposure[i] !== prevExposure && slippageBps > 0 && equity[i - 1] > 0) {
@@ -260,6 +306,6 @@ window.StrategyEngine = (function () {
 
   return {
     walk: walk, computeStatus: computeStatus, backtestEquityCurve: backtestEquityCurve,
-    compoundEquity: compoundEquity, cagr: cagr
+    compoundEquity: compoundEquity, cagr: cagr, realizedVol: realizedVol, exposureAt: exposureAt
   };
 })();

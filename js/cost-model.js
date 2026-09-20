@@ -1,8 +1,8 @@
 // The cost model — deliberately tiny and standalone so it can be read (and
 // checked against the legal documents) in one sitting. Everything the
 // explorer charges for holding a leveraged product goes through
-// CostModel.dailyFactor; nothing else in the app computes a fee or a
-// financing cost.
+// CostModel.dailyGrowth (dailyFactor is the same number with its parts
+// broken out); nothing else in the app computes a fee or a financing cost.
 //
 // It implements the WisdomTree pricing rule literally
 // (Collateralised ETP Securities base prospectus, p.72 and p.199):
@@ -42,15 +42,28 @@ window.CostModel = (function () {
   //
   // Returns the growth factor for the period plus its parts, so the UI can
   // show exactly where the drag came from.
-  function dailyFactor(exposure, underlyingReturn, days, baseRatePct, product) {
+  // The growth factor alone, allocation-free — this is what the backtest loop
+  // calls (a 98-year daily series is ~25,000 calls per curve, times a 7x7
+  // matrix). dailyFactor below returns the same number plus its parts.
+  function dailyGrowth(exposure, underlyingReturn, days, baseRatePct, product) {
     var p = product || {};
-    var borrowed = Math.max(0, exposure - 1);
+    var borrowed = exposure > 1 ? exposure - 1 : 0;
     var financing = borrowed * ((baseRatePct || 0) + (p.fundingSpreadPct || 0)) / 100 * days / 360;
     var R = exposure * underlyingReturn - financing;
     // CA is charged on the product's whole value. A sub-1x volatility-targeted
     // position only has `exposure` of capital in the product, so scale it.
+    var CA = ((p.mgmtFeePct || 0) / 100 * days / 360 + (p.dailySwapRatePct || 0) / 100 * days) * (exposure < 1 ? exposure : 1);
+    return (1 + R) * (1 - CA);
+  }
+
+  // Same number, with the parts, so the UI can show where the drag came from.
+  function dailyFactor(exposure, underlyingReturn, days, baseRatePct, product) {
+    var p = product || {};
+    var borrowed = Math.max(0, exposure - 1);
+    var financing = borrowed * ((baseRatePct || 0) + (p.fundingSpreadPct || 0)) / 100 * days / 360;
     var CA = ((p.mgmtFeePct || 0) / 100 * days / 360 + (p.dailySwapRatePct || 0) / 100 * days) * Math.min(exposure, 1);
-    return { factor: (1 + R) * (1 - CA), financing: financing, charges: CA, R: R };
+    return { factor: dailyGrowth(exposure, underlyingReturn, days, baseRatePct, product), financing: financing, charges: CA,
+             R: exposure * underlyingReturn - financing };
   }
 
   // The product held at a given exposure: the smallest listed leverage that is
@@ -75,5 +88,5 @@ window.CostModel = (function () {
     return { chargesPct: charges * 100, financingPct: financing * 100, totalPct: (charges + financing) * 100 };
   }
 
-  return { dailyFactor: dailyFactor, pickProduct: pickProduct, annualDrag: annualDrag };
+  return { dailyGrowth: dailyGrowth, dailyFactor: dailyFactor, pickProduct: pickProduct, annualDrag: annualDrag };
 })();
