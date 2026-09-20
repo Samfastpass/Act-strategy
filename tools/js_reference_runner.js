@@ -37,7 +37,9 @@ const out = input.configs.map(c => {
     params = Object.assign(params, { volLen: c.volLen, volGate: c.gate, leverage: { base: c.high, gated: c.low }, latch: c.latch, volSeries: volCache[c.volLen] });
   }
   const w = StrategyEngine.walk(prices, params);
-  const curve = StrategyEngine.compoundEquity(prices, w.state.slice(), w.startIdx, prices.length - 1, c.costs ? costs : null);
+  // exposure: the walk's leverage while IN, c.out while OUT (0 = cash), from the walk's start onward
+  const expo = w.state.map((s, i) => (s > 0 ? s : (i >= w.startIdx ? (c.out || 0) : 0)));
+  const curve = StrategyEngine.compoundEquity(prices, expo, w.startIdx, prices.length - 1, c.costs ? costs : null);
   return { final: curve[curve.length - 1].equity };
 });
 process.stdout.write(JSON.stringify(out));

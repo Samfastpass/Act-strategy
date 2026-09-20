@@ -10,8 +10,9 @@ two agree to the last digit on dozens of configurations, a bug would have to be
 made twice in different languages. The JS side is the real site code
 (js/cost-model.js + js/strategy-engine.js), run through tools/js_reference_runner.js.
 
-Covers: fixed leverage 1x/2x/3x/5x with and without costs, and vol-gated 5x->3x and
-3x->1x across vol windows 10/20/60 days, gates 15/22/30%, latched and unlatched.
+Covers: fixed leverage 1x/2x/3x/5x with and without costs, vol-gated 5x->3x and
+3x->1x across vol windows 10/20/60 days, gates 15/22/30%, latched and unlatched, and
+holding 1x/2x BELOW the SMA instead of cash.
 """
 import datetime, json, os, subprocess, sys, tempfile, urllib.request
 import numpy as np
@@ -53,14 +54,23 @@ def main():
                 for latch in (True, False):
                     configs.append(dict(sma=200, buffer=0.03, high=high, low=low, gate=gate, volLen=vol_len, latch=latch, costs=True))
 
+    # hold some leverage BELOW the SMA instead of cash (out tier), fixed and gated
+    for out in (1, 2):
+        for high in (3, 5):
+            configs.append(dict(sma=200, buffer=0.03, high=high, gate=None, out=out, costs=True))
+        configs.append(dict(sma=200, buffer=0.03, high=5, low=3, gate=0.22, volLen=20, latch=True, out=1, costs=True))
+        configs.append(dict(sma=250, buffer=0.04, high=5, low=2, gate=0.18, volLen=30, latch=False, out=1, costs=True))
+        configs.append(dict(sma=200, buffer=0.03, high=5, low=3, gate=0.22, volLen=20, latch=True, out=out, costs=False))
+
     py = []
     for c in configs:
         kw = dict(products=products, rate_monthly=fed, dividend_monthly=div, slippage_bps_round_trip=SLIP) if c["costs"] else {}
+        out_lev = float(c.get("out", 0))
         if c["gate"] is None:
-            r = sl.run_backtest(dates, closes, c["sma"], c["buffer"], leverage_high=c["high"], **kw)
+            r = sl.run_backtest(dates, closes, c["sma"], c["buffer"], leverage_high=c["high"], out_leverage=out_lev, **kw)
         else:
             r = sl.run_backtest(dates, closes, c["sma"], c["buffer"], vol_n=c["volLen"], vol_gate=c["gate"],
-                                leverage_high=c["high"], leverage_low=c["low"], latch=c["latch"], **kw)
+                                leverage_high=c["high"], leverage_low=c["low"], latch=c["latch"], out_leverage=out_lev, **kw)
         py.append(float(r["equity"][-1]))
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
