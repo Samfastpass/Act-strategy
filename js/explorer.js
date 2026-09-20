@@ -1,26 +1,35 @@
-// S&P Leverage explorer — now a general leverage explorer across five
-// assets. Sweeps the *binary* version of a trend strategy — in at a fixed
-// leverage, out to cash, no vol gate — across a grid of SMA lengths (rows)
-// and symmetric buffers (columns), with a real, sourced cost model
-// (expense ratio, leverage financing spread, slippage) applied throughout.
+// Strategy Explorer (formerly the S&P Leverage explorer) — a general explorer
+// across five assets. Sweeps a trend strategy — in at a leverage, out to cash —
+// across a grid of SMA lengths (rows) and symmetric buffers (columns), with a
+// real, sourced cost model (fees, financing, slippage) applied throughout.
 //
-// The binary strategy is not new logic: it's the engine's existing
-// `fixedLeverage` mode with volGate null and leverage {base: L, gated: null},
-// so StrategyEngine.walk is reused unchanged. Equity compounding (with
-// costs) goes through StrategyEngine.compoundEquity — the same shared core
-// js/perf-chart.js's underwater panel and the Developed tab's equity chart
-// build on — so there is exactly one place that knows how leverage, ruin,
-// and costs combine.
+// Two sizing modes, both just parameters of the engine's existing
+// `fixedLeverage` walk (StrategyEngine.walk), not new logic:
+//   Fixed leverage — in at L, out to cash (volGate null).
+//   Vol-gated      — enter at the high leverage only while realised vol is
+//                    below a gate; when vol reaches the gate, drop to a lower
+//                    leverage. Latched (default; the live S&P strategy) is a
+//                    one-way ratchet that stays down until the next exit;
+//                    unlatched follows vol both ways.
+// Equity compounding (with costs) goes through StrategyEngine.compoundEquity —
+// the same shared core js/perf-chart.js's underwater panel and the Developed
+// tab's equity chart build on — so there is exactly one place that knows how
+// leverage, ruin, and costs combine.
 window.Explorer = (function () {
   var fmt = window.App.fmt;
 
   var ASSETS = [
-    { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED", live: { sma: 200, buffer: 3 } },
-    { key: "BTC", label: "Bitcoin", backtestAsset: "BTC", live: null },
-    { key: "GOLD", label: "Gold", backtestAsset: "GOLD", live: null },
-    { key: "NASDAQ100", label: "Nasdaq 100", backtestAsset: "NASDAQ100", live: null },
-    { key: "FTSE100", label: "FTSE 100", backtestAsset: "FTSE100", live: null }
+    // gate: the vol-gate thresholds offered (annualised vol, %) and the
+    // default. S&P's 22% is the live strategy's; the others are round numbers
+    // around each asset's typical vol, NOT tuned — no live strategy exists.
+    // BTC has no leveraged product, so there is nothing to gate.
+    { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED", live: { sma: 200, buffer: 3 }, gate: { options: [16, 18, 20, 22, 25, 30], def: 22 } },
+    { key: "BTC", label: "Bitcoin", backtestAsset: "BTC", live: null, gate: null },
+    { key: "GOLD", label: "Gold", backtestAsset: "GOLD", live: null, gate: { options: [10, 12, 15, 18, 22], def: 15 } },
+    { key: "NASDAQ100", label: "Nasdaq 100", backtestAsset: "NASDAQ100", live: null, gate: { options: [18, 22, 26, 30, 35], def: 26 } },
+    { key: "FTSE100", label: "FTSE 100", backtestAsset: "FTSE100", live: null, gate: { options: [12, 14, 16, 18, 22], def: 16 } }
   ];
+  var VOL_WINDOWS = [10, 20, 30, 60];
 
   var GRIDS = {
     broad: { smas: [50, 100, 120, 150, 200, 250, 300], buffers: [0, 1, 2, 3, 5, 7.5, 10] },
@@ -40,14 +49,43 @@ window.Explorer = (function () {
 
   var state = {
     asset: "SP500", periodIdx: 0, leverage: 5, grid: "broad", metric: "calmar", selected: null,
+    sizing: "fixed", latch: true, volLen: 20, gate: {}, downTo: null, // gate: assetKey -> chosen threshold %
     perfMode: "total", annMode: "calendar", slippageTier: "medium",
     costOverrides: {} // assetKey -> { productLeverage -> { mgmtFeePct, dailySwapRatePct, fundingSpreadPct, basisPct } } once user edits
   };
-  var walkCache = {}; // "asset|sma|buffer" -> { state, sma, startIdx }
+  var walkCache = {}; // stamp|sma|buffer|sizing -> { state, sma, startIdx, ... }
+  var volCache = {};  // stamp|volLen -> realised-vol series, shared by every cell's walk
 
   function assetConfig(key) { return ASSETS.filter(function (a) { return a.key === key; })[0]; }
 
-  function paramsFor(smaLen, bufferPct) {
+  // The gating settings actually in force (or { enabled: false }).
+  function gateSettings() {
+    var asset = assetConfig(state.asset);
+    if (state.sizing !== "gated" || !asset.gate || state.leverage <= 1) return { enabled: false };
+    var gatePct = state.gate[state.asset] != null ? state.gate[state.asset] : asset.gate.def;
+    var opts = ALL_LEVERAGES.filter(function (l) { return l < state.leverage; });
+    var low = opts.indexOf(state.downTo) >= 0 ? state.downTo : Math.max(1, state.leverage - 2);
+    if (opts.indexOf(low) < 0) low = opts[opts.length - 1];
+    return { enabled: true, volLen: state.volLen, gatePct: gatePct, gate: gatePct / 100,
+             high: state.leverage, low: low, latch: state.latch };
+  }
+
+  function gateLabel(gs) {
+    return gs.high + "×→" + gs.low + "× " + (gs.latch ? "latched" : "unlatched") + " at " + gs.volLen + "d vol ≥ " + gs.gatePct + "%";
+  }
+
+  function paramsFor(smaLen, bufferPct, gs, volSeries) {
+    if (gs && gs.enabled) {
+      return {
+        smaLen: smaLen, buffer: bufferPct / 100,
+        volLen: gs.volLen, volGate: gs.gate, annualization: 252, volSeries: volSeries,
+        // Unlike the binary sweep, the walk here is done AT the real leverages:
+        // when the gate trips the state changes between two non-zero levels, so
+        // the walk (not the caller) decides the exposure.
+        leverage: { base: gs.high, gated: gs.low }, latch: gs.latch,
+        sizing: { mode: "fixedLeverage" }
+      };
+    }
     return {
       smaLen: smaLen, buffer: bufferPct / 100,
       volLen: null, volGate: null, annualization: 252,
@@ -59,11 +97,25 @@ window.Explorer = (function () {
     };
   }
 
-  function walkFor(prices, assetKey, smaLen, bufferPct) {
-    var key = assetKey + "|" + smaLen + "|" + bufferPct;
+  // Caches are keyed on the price series' length and last date, so importing
+  // new days invalidates them instead of serving walks that are one row short.
+  function walkFor(prices, assetKey, smaLen, bufferPct, gs) {
+    var stamp = assetKey + "|" + prices.length + "|" + prices[prices.length - 1].date;
+    var gated = gs && gs.enabled;
+    var key = stamp + "|" + smaLen + "|" + bufferPct + "|"
+      + (gated ? ["g", gs.volLen, gs.gatePct, gs.high, gs.low, gs.latch].join(":") : "f");
     if (walkCache[key]) return walkCache[key];
-    var w = window.StrategyEngine.walk(prices, paramsFor(smaLen, bufferPct));
-    walkCache[key] = { state: w.state, sma: w.sma, startIdx: w.startIdx };
+    if (Object.keys(walkCache).length > 600) { walkCache = {}; volCache = {}; }
+
+    var volSeries = null;
+    if (gated) {
+      var vkey = stamp + "|" + gs.volLen;
+      volCache[vkey] = volCache[vkey] || window.StrategyEngine.realizedVol(prices.map(function (p) { return p.close; }), gs.volLen, 252);
+      volSeries = volCache[vkey];
+    }
+    var w = window.StrategyEngine.walk(prices, paramsFor(smaLen, bufferPct, gs, volSeries));
+    walkCache[key] = { state: w.state, sma: w.sma, startIdx: w.startIdx, gated: !!gated,
+                       high: gated ? gs.high : null, low: gated ? gs.low : null, label: gated ? gateLabel(gs) : null };
     return walkCache[key];
   }
 
@@ -120,12 +172,18 @@ window.Explorer = (function () {
     var byMonth = {};
     ser.forEach(function (r) { byMonth[r[0]] = r[1]; });
     var first = ser[0][1], last = ser[ser.length - 1][1];
+    // The backtest asks for the same month ~21 times running; remember the last
+    // answer so most calls skip the hash lookup.
+    var lastKey = null, lastVal = 0;
     return {
       loaded: true, earliest: ser[0][0], latest: ser[ser.length - 1][0], latestValue: last,
       fn: function (dateStr) {
-        var v = byMonth[dateStr.slice(0, 7)];
-        if (v != null) return v;
-        return dateStr.slice(0, 7) < ser[0][0] ? first : last;
+        var key = dateStr.slice(0, 7);
+        if (key === lastKey) return lastVal;
+        var v = byMonth[key];
+        if (v == null) v = key < ser[0][0] ? first : last;
+        lastKey = key; lastVal = v;
+        return v;
       }
     };
   }
@@ -177,7 +235,7 @@ window.Explorer = (function () {
     var exposure = new Array(hi + 1);
     var trades = 0;
     for (var i = lo; i <= hi; i++) {
-      exposure[i] = wk.state[i] > 0 ? leverage : 0;
+      exposure[i] = window.StrategyEngine.exposureAt(wk, i, leverage);
       if (i > lo && (exposure[i] > 0) !== (exposure[i - 1] > 0)) trades++;
     }
     var curve = window.StrategyEngine.compoundEquity(prices, exposure, lo, hi, costs);
@@ -239,14 +297,55 @@ window.Explorer = (function () {
     return '<span class="conf-badge ' + cls + '">' + (conf === "edited" ? "your edit" : conf) + '</span>';
   }
 
+  function gateSummary(gs) {
+    var v = gs.volLen + "-day volatility", g = gs.gatePct + "%";
+    return "Enters at " + gs.high + "× only while " + v + " is below " + g + " (otherwise it waits, out of the market, until vol calms). "
+      + (gs.latch
+        ? "If vol reaches " + g + " or more while invested it drops to " + gs.low + "× and <strong>stays there until the position exits and re-enters</strong> — a one-way ratchet. The live S&amp;P strategy works this way (20d, 22%, 5×→3×)."
+        : "<strong>Unlatched:</strong> while invested it follows vol both ways — " + gs.low + "× whenever vol is " + g + " or more, back to " + gs.high + "× once it falls below.")
+      + " Vol is annualised from daily log returns. Each change of leverage is a trade and pays slippage.";
+  }
+
   function controlsHTML(costs) {
     var asset = assetConfig(state.asset);
+    var gs = gateSettings();
     var leverageDisabled = function (l) {
       if (l <= costs.maxLeverage) return null;
       return costs.leverageRestriction
         ? l + "x: " + costs.leverageRestriction
         : l + "x: no real leveraged product found for " + asset.label + " at this level.";
     };
+    var gatedNote = "";
+    if (state.sizing === "gated" && !gs.enabled) {
+      gatedNote = '<div class="toolsrow">Vol gating needs leverage above 1× to reduce — ' + (asset.gate ? 'pick 2×, 3× or 5× above.' : asset.label + ' has no leveraged product, so there is nothing to gate.') + ' Showing fixed leverage.</div>';
+    }
+    var gateControls = "";
+    if (gs.enabled) {
+      var lows = ALL_LEVERAGES.filter(function (l) { return l < gs.high; });
+      gateControls = '<div class="exp-controls exp-gate">'
+        + '<div class="exp-ctl"><label>Latch</label><div class="winbtns">'
+        + btnRow([{ label: "Latched (one-way)", v: 1 }, { label: "Unlatched (two-way)", v: 0 }],
+                 function (it) { return (it.v === 1) === gs.latch; },
+                 function (it) { return 'data-latch="' + it.v + '"'; })
+        + '</div></div>'
+        + '<div class="exp-ctl"><label>Vol window</label><div class="winbtns">'
+        + btnRow(VOL_WINDOWS.map(function (w) { return { label: w + "d", w: w }; }),
+                 function (it) { return it.w === gs.volLen; },
+                 function (it) { return 'data-vw="' + it.w + '"'; })
+        + '</div></div>'
+        + '<div class="exp-ctl"><label>Latch down when vol ≥</label><div class="winbtns">'
+        + btnRow(asset.gate.options.map(function (g) { return { label: g + "%", g: g }; }),
+                 function (it) { return it.g === gs.gatePct; },
+                 function (it) { return 'data-gate="' + it.g + '"'; })
+        + '</div></div>'
+        + '<div class="exp-ctl"><label>Down to</label><div class="winbtns">'
+        + btnRow(lows.map(function (l) { return { label: l + "×", l: l }; }),
+                 function (it) { return it.l === gs.low; },
+                 function (it) { return 'data-down="' + it.l + '"'; })
+        + '</div></div>'
+        + '</div>'
+        + '<div class="toolsrow">' + gateSummary(gs) + '</div>';
+    }
     return '<div class="exp-controls">'
       + '<div class="exp-ctl"><label>Asset</label><div class="winbtns">'
       + btnRow(ASSETS.map(function (a) { return { label: a.label, key: a.key }; }),
@@ -258,11 +357,17 @@ window.Explorer = (function () {
                function (it) { return it.i === state.periodIdx; },
                function (it) { return 'data-period="' + it.i + '"'; })
       + '</div></div>'
-      + '<div class="exp-ctl"><label>Leverage</label><div class="winbtns">'
+      + '<div class="exp-ctl"><label>' + (gs.enabled ? "High leverage" : "Leverage") + '</label><div class="winbtns">'
       + btnRow(ALL_LEVERAGES.map(function (l) { return { label: l + "x", l: l }; }),
                function (it) { return it.l === state.leverage; },
                function (it) { return 'data-lev="' + it.l + '"' + (leverageDisabled(it.l) ? " disabled" : ""); },
                function (it) { return leverageDisabled(it.l); })
+      + '</div></div>'
+      + '<div class="exp-ctl"><label>Sizing</label><div class="winbtns">'
+      + btnRow([{ label: "Fixed leverage", s: "fixed" }, { label: "Vol-gated", s: "gated" }],
+               function (it) { return it.s === state.sizing; },
+               function (it) { return 'data-sizing="' + it.s + '"' + (it.s === "gated" && !asset.gate ? " disabled" : ""); },
+               function (it) { return it.s === "gated" && !asset.gate ? asset.label + " has no leveraged product, so there is no leverage to gate." : null; })
       + '</div></div>'
       + '<div class="exp-ctl"><label>Grid</label><div class="winbtns">'
       + btnRow([{ label: "Broad", g: "broad" }, { label: "Zoomed", g: "zoom" }],
@@ -279,10 +384,33 @@ window.Explorer = (function () {
                function (it) { return it.t === state.slippageTier; },
                function (it) { return 'data-slip="' + it.t + '"'; })
       + '</div></div>'
-      + '</div>';
+      + '</div>' + gatedNote + gateControls;
   }
 
-  function costsPanelHTML(cfg, refRates) {
+  // Headline fee tiles + history chart (js/fee-chart.js), from the same product
+  // fields and reference series the backtest uses.
+  function feeBoxHTML(cfg, refRates, prices, period, gs) {
+    var L = state.leverage;
+    var prod = window.CostModel.pickProduct(cfg.products, L);
+    var rate = refSeriesFn(refRates, cfg.financingRateAsset);
+    var div = cfg.dividends || {};
+    var divFn = div.series ? refSeriesFn(refRates, div.series).fn : (div.constantPct ? function () { return div.constantPct; } : null);
+    function engineOf(p) { return { mgmtFeePct: p.mgmtFeePct, dailySwapRatePct: p.dailySwapRatePct, fundingSpreadPct: p.fundingSpreadPct + p.basisPct }; }
+    var b = periodBounds(prices, period);
+    var from = prices[Math.max(0, b.lo)].date, to = prices[b.hi].date;
+    var lowProd = gs.enabled ? window.CostModel.pickProduct(cfg.products, gs.low) : null;
+    return window.FeeChart.render({
+      primary: { exposure: L, product: engineOf(prod) },
+      secondary: gs.enabled ? { exposure: gs.low, product: engineOf(lowProd) } : null,
+      rateFn: cfg.financingRateAsset ? rate.fn : null, rateName: cfg.financingRateAsset,
+      rateNow: rate.loaded ? rate.latestValue : 0, rateNowMonth: rate.latest,
+      rateEarliest: rate.loaded ? rate.earliest : null,
+      divFn: divFn, from: from, to: to,
+      productName: prod.name, quotedCharge: prod.mgmtFeePct + prod.dailySwapRatePct * 360
+    });
+  }
+
+  function costsPanelHTML(cfg, refRates, prices, period, gs) {
     var L = state.leverage;
     var prod = window.CostModel.pickProduct(cfg.products, L);
     var rate = refSeriesFn(refRates, cfg.financingRateAsset);
@@ -344,6 +472,7 @@ window.Explorer = (function () {
 
     return '<div class="panel">'
       + '<h2>Costs — ' + assetConfig(state.asset).label + '</h2>'
+      + feeBoxHTML(cfg, refRates, prices, period, gs)
       + '<div class="toolsrow"><strong>Product held at ' + L + '×:</strong> ' + (prod.source && prod.source.url ? '<a href="' + prod.source.url + '" target="_blank" rel="noopener">' + prod.name + '</a>' : prod.name) + viaNote + '</div>'
       + '<div class="cost-grid">'
       + row('Management fee (% a year)', 'cost-mgmt', fmt(prod.mgmtFeePct, 3), 0.01, prod.confidence.mgmtFeePct)
@@ -422,14 +551,14 @@ window.Explorer = (function () {
       + '</div>';
   }
 
-  function render(container, data, costAssumptions, refRates) {
+  function renderMain(container, data, costAssumptions, refRates) {
     var asset = assetConfig(state.asset);
     var prices = data[window.App.assetKey(asset.backtestAsset)];
     if (!prices || !prices.length) {
-      container.innerHTML = '<div class="panel"><h2>S&amp;P leverage explorer</h2>'
+      container.innerHTML = '<div class="panel"><h2>Strategy Explorer</h2>'
         + controlsHTML(costConfigFor(costAssumptions, state.asset))
         + '<div class="fatal">No ' + asset.backtestAsset + ' data loaded yet for ' + asset.label
-        + '. Use the Twelve Data refresh or CSV import on the Developed strategies tab to bring in its history, then come back here.</div></div>';
+        + '. Use the <strong>Data</strong> section at the bottom of this tab (Twelve Data refresh) to bring in its history.</div></div>';
       wire(container, data, costAssumptions, refRates);
       return;
     }
@@ -439,12 +568,13 @@ window.Explorer = (function () {
 
     var ec = engineCostsFrom(costs, refRates);
 
+    var gs = gateSettings();
     var grid = GRIDS[state.grid];
     var period = PERIODS[state.periodIdx];
 
     var cells = grid.smas.map(function (sma) {
       return grid.buffers.map(function (buf) {
-        return windowStats(prices, walkFor(prices, asset.key, sma, buf), period, state.leverage, ec);
+        return windowStats(prices, walkFor(prices, asset.key, sma, buf, gs), period, state.leverage, ec);
       });
     });
     var maxAbs = 0;
@@ -485,7 +615,7 @@ window.Explorer = (function () {
     cells.forEach(function (row) { row.forEach(function (s) { total++; if (s.ruined) ruinedCount++; }); });
 
     var html = '<div class="panel">'
-      + '<h2>Leverage explorer — ' + asset.label + ', binary in/out at ' + state.leverage + 'x</h2>'
+      + '<h2>Strategy Explorer — ' + asset.label + ', ' + (gs.enabled ? 'vol-gated ' + gs.high + '×→' + gs.low + '× (' + (gs.latch ? 'latched' : 'unlatched') + ')' : 'binary in/out at ' + state.leverage + 'x') + '</h2>'
       + controlsHTML(costs)
       + legendHTML(maxAbs)
       + '<div class="matrixwrap"><table class="matrix"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
@@ -500,10 +630,10 @@ window.Explorer = (function () {
       + 'the in/out signal still carries in from before it, so there is no artificial trade on day one.'
       + '</div></div>';
 
-    html += costsPanelHTML(costs, refRates);
+    html += costsPanelHTML(costs, refRates, prices, period, gs);
 
     if (state.selected && state.selected.asset === asset.key) {
-      var selWalk = walkFor(prices, asset.key, state.selected.sma, state.selected.buffer);
+      var selWalk = walkFor(prices, asset.key, state.selected.sma, state.selected.buffer, gs);
       html += window.PriceChart.render(prices, state.selected, state.leverage, period, selWalk);
       html += costBreakdownHTML(prices, selWalk, period, state.leverage, ec);
       html += window.PerfChart.render(prices, state.selected, state.leverage, period, selWalk,
@@ -515,7 +645,7 @@ window.Explorer = (function () {
   }
 
   function wire(container, data, costAssumptions, refRates) {
-    function rerender() { render(container, data, costAssumptions, refRates); }
+    function rerender() { renderMain(container, data, costAssumptions, refRates); }
     function bind(sel, fn) {
       container.querySelectorAll(sel).forEach(function (el) {
         el.addEventListener("click", function () { if (el.disabled) return; fn(el); rerender(); });
@@ -527,6 +657,11 @@ window.Explorer = (function () {
     });
     bind("[data-period]", function (el) { state.periodIdx = Number(el.getAttribute("data-period")); });
     bind("[data-lev]", function (el) { state.leverage = Number(el.getAttribute("data-lev")); });
+    bind("[data-sizing]", function (el) { state.sizing = el.getAttribute("data-sizing"); });
+    bind("[data-latch]", function (el) { state.latch = el.getAttribute("data-latch") === "1"; });
+    bind("[data-vw]", function (el) { state.volLen = Number(el.getAttribute("data-vw")); });
+    bind("[data-gate]", function (el) { state.gate[state.asset] = Number(el.getAttribute("data-gate")); });
+    bind("[data-down]", function (el) { state.downTo = Number(el.getAttribute("data-down")); });
     bind("[data-grid]", function (el) { state.grid = el.getAttribute("data-grid"); });
     bind("[data-metric]", function (el) { state.metric = el.getAttribute("data-metric"); });
     bind("[data-slip]", function (el) { state.slippageTier = el.getAttribute("data-slip"); });
@@ -559,6 +694,45 @@ window.Explorer = (function () {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
       });
     });
+  }
+
+  // --- data section (auto import) --------------------------------------
+  // The Twelve Data refresh lives here as well as on the Developed tab, so the
+  // explorer's assets (especially Gold / Nasdaq / FTSE, which start empty) can
+  // be brought up to date without leaving the tab.
+  function dataPanelHTML(data) {
+    var today = Date.now();
+    var rows = ASSETS.map(function (a) {
+      var series = data[window.App.assetKey(a.backtestAsset)] || [];
+      var last = series.length ? series[series.length - 1].date : null;
+      var behind = last ? Math.round((today - new Date(last + "T00:00:00Z").getTime()) / 86400000) : null;
+      return '<tr><td>' + a.label + '</td><td>' + a.backtestAsset + '</td>'
+        + '<td class="num">' + (series.length ? series.length.toLocaleString() : "—") + '</td>'
+        + '<td>' + (series.length ? series[0].date : "—") + '</td>'
+        + '<td>' + (last || "no data yet") + '</td>'
+        + '<td class="num' + (behind == null || behind > 5 ? ' stale' : '') + '">' + (behind == null ? "import needed" : behind <= 1 ? "current" : behind + " days behind") + '</td></tr>';
+    }).join("");
+    return '<div class="panel">'
+      + '<h2>Data — auto import</h2>'
+      + '<div class="matrixwrap"><table class="datatable"><thead><tr><th>Asset</th><th>Series</th><th>Rows</th><th>From</th><th>Latest</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      + '<div class="toolsrow">Refreshing pulls each asset from Twelve Data — BTC, SPY (the S&amp;P; its new days are converted into <code>SPX_MERGED</code>), Gold, Nasdaq 100 (via QQQ) and FTSE 100 (via S100) — and shows a preview before anything is saved. '
+      + 'An asset with no rows yet backfills its full available history. Fees, financing and dividend reference data (<code>reference-rates.json</code>) are static and are not touched here.</div>'
+      + '</div>'
+      + window.ImportTools.refreshPanelHTML();
+  }
+
+  // Public entry point. The explorer's own controls re-render only #exp-main,
+  // so a half-finished import preview in #exp-data survives clicking around.
+  function render(container, data, costAssumptions, refRates, ctx) {
+    var main = container.querySelector("#exp-main");
+    if (!main) {
+      container.innerHTML = '<div id="exp-main"></div><div id="exp-data"></div>';
+      main = container.querySelector("#exp-main");
+    }
+    renderMain(main, data, costAssumptions, refRates);
+    var dataEl = container.querySelector("#exp-data");
+    dataEl.innerHTML = dataPanelHTML(data);
+    if (ctx) window.ImportTools.wireUp(dataEl, ctx);
   }
 
   return { render: render };

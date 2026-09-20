@@ -1,4 +1,5 @@
-// Data import tooling for the Developed Strategies tab:
+// Data import tooling, mounted on the Developed Strategies tab (both panels)
+// and the Strategy Explorer tab (the Twelve Data refresh only):
 //   1. A "Refresh from Twelve Data" button that pulls missing recent days
 //      for BTC/SPY from the Twelve Data API.
 //   2. A CSV drag-and-drop for bulk/backfill imports.
@@ -116,7 +117,7 @@ window.ImportTools = (function () {
     }
   }
 
-  function panelHTML() {
+  function refreshPanelHTML() {
     return ''
       + '<div class="panel">'
       + '<h2>Refresh from Twelve Data</h2>'
@@ -130,7 +131,11 @@ window.ImportTools = (function () {
       + '<div id="td-preview-body" style="font-size:12px; color:var(--ink-soft);"></div>'
       + '<button class="add" id="td-confirm-btn" style="margin-top:8px;">Confirm import</button>'
       + '</div>'
-      + '</div>'
+      + '</div>';
+  }
+
+  function csvPanelHTML() {
+    return ''
       + '<div class="panel">'
       + '<h2>Drop a CSV to import</h2>'
       + '<div class="formrow" style="grid-template-columns: 1fr auto;">'
@@ -150,7 +155,17 @@ window.ImportTools = (function () {
       + '</div>';
   }
 
+  function panelHTML() { return refreshPanelHTML() + csvPanelHTML(); }
+
+  // Wires whichever of the two panels is present in `container` — the
+  // Strategy Explorer mounts only the Twelve Data refresh, the Developed tab
+  // mounts both.
   function wireUp(container, ctx) {
+    if (container.querySelector("#td-api-key")) wireRefresh(container, ctx);
+    if (container.querySelector("#csv-dropzone")) wireCsv(container, ctx);
+  }
+
+  function wireRefresh(container, ctx) {
     var apiKeyInput = container.querySelector("#td-api-key");
     var clearKeyBtn = container.querySelector("#td-clear-key");
     var refreshBtn = container.querySelector("#td-refresh-btn");
@@ -225,6 +240,16 @@ window.ImportTools = (function () {
       }
     });
 
+  }
+
+  function wireCsv(container, ctx) {
+    function showStatus(el, msg, isError) {
+      el.style.display = "block";
+      el.textContent = msg;
+      el.style.color = isError ? "var(--warn)" : "var(--ink-soft)";
+    }
+    function hideStatus(el) { el.style.display = "none"; }
+
     var assetSelect = container.querySelector("#csv-asset-select");
     var dropzone = container.querySelector("#csv-dropzone");
     var fileInput = container.querySelector("#csv-file-input");
@@ -280,5 +305,5 @@ window.ImportTools = (function () {
     });
   }
 
-  return { panelHTML: panelHTML, wireUp: wireUp };
+  return { panelHTML: panelHTML, refreshPanelHTML: refreshPanelHTML, csvPanelHTML: csvPanelHTML, wireUp: wireUp };
 })();

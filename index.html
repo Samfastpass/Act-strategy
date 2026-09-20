@@ -208,6 +208,29 @@
   .ch-legend .sw-neg { background: var(--warn); height: 8px; }
 
   .pc-in { fill: var(--long); opacity: 0.13; }
+  .pc-down { fill: var(--flat); opacity: 0.22; }
+  .ch-legend .sw-downblock { background: var(--flat); opacity: 0.6; height: 8px; }
+  /* fee headline + history chart */
+  .fee-box { margin: 4px 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+  .fc-fees { fill: var(--ink-faint); opacity: 0.34; }
+  .fc-fin { fill: var(--warn); opacity: 0.26; }
+  .fc-held { fill: var(--ink-faint); opacity: 0.12; }
+  .fc-total { fill: none; stroke: var(--warn); stroke-width: 1.6; }
+  .fc-low { fill: none; stroke: var(--flat); stroke-width: 1.5; stroke-dasharray: 2 3; }
+  .fc-div { fill: none; stroke: var(--long); stroke-width: 1.5; stroke-dasharray: 6 3; }
+  .fc-lbl-total { fill: var(--warn); } .fc-lbl-div { fill: var(--long); } .fc-lbl-low { fill: var(--flat); }
+  .ch-legend .sw-fc-fees { background: var(--ink-faint); opacity: 0.6; height: 8px; }
+  .ch-legend .sw-fc-fin { background: var(--warn); opacity: 0.5; height: 8px; }
+  .ch-legend .sw-fc-total { background: var(--warn); }
+  .ch-legend .sw-fc-low { background: repeating-linear-gradient(90deg, var(--flat) 0 2px, transparent 2px 5px); }
+  .ch-legend .sw-fc-div { background: repeating-linear-gradient(90deg, var(--long) 0 6px, transparent 6px 9px); }
+  /* data table on the explorer tab */
+  .datatable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .datatable th, .datatable td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .datatable th { color: var(--ink-soft); font-weight: 500; }
+  .datatable td.num { font-family: var(--mono); }
+  .datatable td.stale { color: var(--warn); }
+  .exp-gate { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
   .pc-band { fill: var(--ink-faint); opacity: 0.16; stroke: none; }
   .pc-sma { fill: none; stroke: var(--ink-faint); stroke-width: 1.3; }
   .pc-price { fill: none; stroke: var(--ink); stroke-width: 1.4; }
@@ -224,7 +247,7 @@
   <nav class="tabnav" id="tabnav" style="display:none;">
     <button class="tab active" data-tab="home">Home</button>
     <button class="tab" data-tab="developed">Developed strategies</button>
-    <button class="tab" data-tab="explorer">S&amp;P Leverage explorer</button>
+    <button class="tab" data-tab="explorer">Strategy Explorer</button>
   </nav>
   <div id="tab-home"></div>
   <div id="tab-developed" style="display:none;"></div>
@@ -240,6 +263,7 @@
 <script src="js/chart.js"></script>
 <script src="js/price-chart.js"></script>
 <script src="js/perf-chart.js"></script>
+<script src="js/fee-chart.js"></script>
 <script src="js/render-helpers.js"></script>
 <script src="js/import-tools.js"></script>
 <script src="js/home.js"></script>
