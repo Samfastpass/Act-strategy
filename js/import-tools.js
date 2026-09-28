@@ -46,38 +46,73 @@ window.ImportTools = (function () {
   }
   function todayUTC() { return new Date().toISOString().slice(0, 10); }
 
-  async function fetchTwelveData(symbolCfg, startDate, endDate, apiKey) {
+  // The free (Basic) plan allows 8 API credits per rolling minute and 800 per
+  // day, and /time_series costs 1 credit per symbol per call — a multi-symbol
+  // "batch" call still costs one credit per symbol, so batching saves nothing.
+  // What does help: fewer calls (see fetchTwelveDataRange) and pacing them so
+  // a refresh that needs more than 8 waits instead of failing on the 9th.
+  var CREDITS_PER_MINUTE = 8;
+  var MAX_POINTS = 5000;
+  var callTimes = [];
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  async function waitForCredit(onWait) {
+    for (;;) {
+      var now = Date.now();
+      callTimes = callTimes.filter(function (t) { return now - t < 60000; });
+      if (callTimes.length < CREDITS_PER_MINUTE) { callTimes.push(now); return; }
+      var waitMs = 60000 - (now - callTimes[0]) + 500;
+      if (onWait) onWait(Math.ceil(waitMs / 1000));
+      await sleep(Math.min(waitMs, 1000));
+    }
+  }
+
+  async function fetchTwelveData(symbolCfg, startDate, endDate, apiKey, onWait) {
     var url = "https://api.twelvedata.com/time_series"
       + "?symbol=" + encodeURIComponent(symbolCfg.symbol)
-      + "&interval=1day&order=ASC&format=JSON"
+      + "&interval=1day&order=ASC&format=JSON&outputsize=" + MAX_POINTS
       + "&start_date=" + startDate + "&end_date=" + endDate
       + "&apikey=" + encodeURIComponent(apiKey);
     if (symbolCfg.exchange) url += "&exchange=" + encodeURIComponent(symbolCfg.exchange);
     if (symbolCfg.mic) url += "&mic_code=" + encodeURIComponent(symbolCfg.mic);
-    var res = await fetch(url);
-    var json = await res.json();
-    if (json.status === "error") throw new Error(json.message || "Twelve Data error");
-    if (!json.values) return [];
-    return json.values.map(function (v) { return { date: v.datetime.slice(0, 10), close: parseFloat(v.close) }; });
+    for (var attempt = 0; ; attempt++) {
+      await waitForCredit(onWait);
+      var res = await fetch(url);
+      var json = await res.json();
+      if (json.status === "error") {
+        // Credits used elsewhere (another tab, another app on the same key)
+        // aren't in callTimes — on a per-minute 429, wait out the minute once.
+        if (json.code === 429 && attempt === 0 && /minute/i.test(json.message || "")) {
+          callTimes = [];
+          for (var s = 61; s > 0; s--) { if (onWait) onWait(s); await sleep(1000); }
+          continue;
+        }
+        // A top-up whose whole range is a weekend or holiday comes back as a
+        // 400 "No data is available on the specified dates" — that's "nothing
+        // new", not a failure.
+        if (json.code === 400 && /no data is available/i.test(json.message || "")) return [];
+        throw new Error(json.message || "Twelve Data error");
+      }
+      if (!json.values) return [];
+      return json.values.map(function (v) { return { date: v.datetime.slice(0, 10), close: parseFloat(v.close) }; });
+    }
   }
 
-  // Twelve Data's free tier caps a single request at ~5000 points (~19 years
-  // of daily data). A brand-new asset's first-ever fetch can span decades, so
-  // chunk it — 12-year windows stay safely under the cap for any daily-
-  // frequency asset, including one (like BTC) with no weekend gaps.
-  async function fetchTwelveDataRange(symbolCfg, startDate, endDate, apiKey) {
-    var CHUNK_YEARS = 12;
+  // One call covers up to 5000 rows (~20 years of trading days, ~13 of BTC's
+  // every-day series), so a normal top-up is one call per asset however long
+  // it's been. Only a multi-decade first backfill needs more. When a range
+  // holds more than 5000 rows Twelve Data returns the NEWEST 5000 (whatever
+  // `order` says — checked 2026-09-28), so a full page means "older rows
+  // remain": page backwards, ending the day before the oldest row received.
+  async function fetchTwelveDataRange(symbolCfg, startDate, endDate, apiKey, onWait) {
     var rows = [];
-    var chunkStart = startDate;
-    while (chunkStart <= endDate) {
-      var d = new Date(chunkStart + "T00:00:00Z");
-      d.setUTCFullYear(d.getUTCFullYear() + CHUNK_YEARS);
-      var chunkEnd = d.toISOString().slice(0, 10);
-      if (chunkEnd > endDate) chunkEnd = endDate;
-      var chunkRows = await fetchTwelveData(symbolCfg, chunkStart, chunkEnd, apiKey);
-      rows = rows.concat(chunkRows);
-      if (chunkEnd >= endDate) break;
-      chunkStart = addDaysUTC(chunkEnd, 1);
+    var to = endDate;
+    while (startDate <= to) {
+      var page = await fetchTwelveData(symbolCfg, startDate, to, apiKey, onWait);
+      rows = page.concat(rows);
+      if (page.length < MAX_POINTS) break;
+      to = addDaysUTC(page[0].date, -1);
     }
     return rows;
   }
@@ -198,6 +233,11 @@ window.ImportTools = (function () {
         var end = todayUTC();
         var results = {};
         var lines = [];
+        var onWait = function (secs) {
+          refreshBtn.textContent = "Waiting " + secs + "s…";
+          showStatus(tdStatus, "Pausing for Twelve Data's free-plan limit (" + CREDITS_PER_MINUTE
+            + " calls a minute) — it'll carry on by itself.", false);
+        };
         for (var asset in TWELVEDATA_SYMBOLS) {
           var cfg = TWELVEDATA_SYMBOLS[asset];
           var existing = data[window.App.assetKey(asset)] || [];
@@ -208,13 +248,22 @@ window.ImportTools = (function () {
           var start = lastRow ? addDaysUTC(lastRow.date, 1) : cfg.backfillFrom;
           if (!start || start > end) { lines.push(asset + ": already up to date"); continue; }
           var isBackfill = !lastRow;
-          var rows = await fetchTwelveDataRange(cfg, start, end, apiKey);
-          results[asset] = rows;
-          lines.push(asset + (isBackfill ? " (full history)" : "") + ": " + rows.length + " new day(s)"
-            + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : ""));
+          refreshBtn.textContent = "Fetching " + asset + "…";
+          // One asset failing (bad symbol, daily cap) shouldn't throw away the
+          // others already fetched — those credits are spent either way.
+          try {
+            var rows = await fetchTwelveDataRange(cfg, start, end, apiKey, onWait);
+            hideStatus(tdStatus);
+            results[asset] = rows;
+            lines.push(asset + (isBackfill ? " (full history)" : "") + ": " + rows.length + " new day(s)"
+              + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : ""));
+          } catch (e) {
+            lines.push(asset + ": couldn't fetch — " + e.message);
+          }
         }
         pendingTd = results;
-        tdPreviewBody.innerHTML = lines.join("<br>");
+        tdPreviewBody.textContent = "";
+        lines.forEach(function (l) { tdPreviewBody.appendChild(document.createTextNode(l)); tdPreviewBody.appendChild(document.createElement("br")); });
         tdPreview.style.display = "block";
       } catch (e) {
         showStatus(tdStatus, "Couldn't fetch: " + e.message, true);
