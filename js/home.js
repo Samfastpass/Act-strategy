@@ -1,16 +1,24 @@
-// Home tab: live status cards for every "active" strategy in
-// strategies.json, plus the daily quick-entry form and history table.
+// Home tab: live status cards for every strategy marked "on Home" (the
+// Supabase `strategies` table — see js/strategy-store.js), plus the daily
+// quick-entry form and history table.
 window.Home = (function () {
   var fmt = window.App.fmt;
 
   function render(container, data, strategies, ctx) {
     var activeStrategies = strategies.filter(function (s) { return s.active; });
 
+    var ro = window.StrategyStore.isReadOnly();
     var cardsHtml = activeStrategies.map(function (s) {
       var prices = data[window.App.assetKey(s.liveAsset)];
+      if (!prices || !prices.length) return "";
       var status = window.StrategyEngine.computeStatus(prices, s);
-      return window.RenderHelpers.renderStatusCard(s, status, "");
+      var actions = '<div class="card-actions"><button class="winbtn" data-unhome="' + s.id + '"'
+        + (ro ? ' disabled title="Run supabase/strategies.sql in Supabase to enable"' : '') + '>Remove from Home</button></div>';
+      return window.RenderHelpers.renderStatusCard(s, status, actions);
     }).join("");
+    if (!cardsHtml) {
+      cardsHtml = '<div class="panel"><div class="toolsrow" style="margin-top:0;">No strategies on Home. Use <strong>Show on Home</strong> on the Developed strategies tab.</div></div>';
+    }
 
     var lastDate = data.btc.length ? data.btc[data.btc.length - 1].date : "";
 
@@ -34,6 +42,19 @@ window.Home = (function () {
       + '<div class="histwrap"><table class="hist"><thead><tr><th>Date</th><th>BTC</th><th>SPY</th></tr></thead><tbody>' + histRows + '</tbody></table></div>'
       + '<div class="toolsrow">' + data.btc.length + ' BTC days &middot; ' + data.spy.length + ' SPY days on record, both computed fresh from full history each load</div>'
       + '</div>';
+
+    container.querySelectorAll("[data-unhome]").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        if (btn.disabled) return;
+        btn.disabled = true; btn.textContent = "Saving…";
+        try {
+          await window.StrategyStore.setOnHome(btn.getAttribute("data-unhome"), false);
+          await ctx.onStrategiesChanged();
+        } catch (e) {
+          btn.disabled = false; btn.textContent = "Failed — " + e.message;
+        }
+      });
+    });
 
     var dateInput = container.querySelector("#in-date");
     var today = new Date(); dateInput.value = today.toISOString().slice(0, 10);

@@ -5,18 +5,22 @@ A live dashboard tracking systematic trading strategies daily, backed by
 Supabase, deployed as a static site on GitHub Pages. Still zero build
 step — `index.html` plus a handful of plain `<script src>` files under
 `js/` (see CLAUDE.md for the file layout). Three tabs:
-- **Home** — daily-use view: live status card per `active: true` strategy
-  in `strategies.json`, the quick "log today's close" form, and history
+- **Home** — daily-use view: live status card per strategy marked on Home
+  (removable from the card), the quick "log today's close" form, and history
   table.
 - **Developed strategies** — the same strategies, each with a live status
-  card plus CAGR backtested over four windows (all-time/10y/3y/1y), and
-  the data-import tools (Twelve Data refresh + CSV drag-and-drop).
+  card plus CAGR backtested over four windows (all-time/10y/3y/1y) — gross,
+  and net of the Explorer's cost model (identical to the Evaluator's number
+  for the same strategy) — Show-on-Home / Delete buttons, and the
+  data-import tools (Twelve Data refresh + CSV drag-and-drop).
 - **Strategy explorer** — placeholder, see "Where this is headed" below.
 
 ## Strategy config
 Strategy parameters (SMA length, buffer, vol gate, leverage, annualization,
-which asset each one live-tracks vs. backtests against) live in
-`strategies.json`, not hardcoded per-strategy JS. `js/strategy-engine.js`
+which asset each one live-tracks vs. backtests against) live in data, not
+hardcoded per-strategy JS — originally `strategies.json`, since 2026-09-28 the
+Supabase `strategies` table (see Data model), with `strategies.json` as its
+seed and fallback. `js/strategy-engine.js`
 is one generic parameterized engine (`computeStatus`/`backtestEquityCurve`/
 `cagr`) that both strategies run through — replaced the old
 hand-duplicated `computeBTC`/`computeSPY` functions. A new strategy is
@@ -129,9 +133,21 @@ continuous and trading-day series alike. Dividing rows by
    history was available.
 
 ## Data model (Supabase)
-One table, `prices`, long format: `asset text, date date, close numeric`,
+`prices`, long format: `asset text, date date, close numeric`,
 primary key `(asset, date)`. RLS is off (personal single-user tool, no
 login system). No `strategy_state` table — see above for why.
+
+`strategies` (added 2026-09-28, `supabase/strategies.sql`): `id text` PK,
+`position int`, `on_home bool`, `def jsonb`, `created_at`. It holds the list
+the Home and Developed tabs show, so strategies can be added from the
+Explorer/Evaluator and removed or moved on/off Home from the site itself, the
+same on every device — a static `strategies.json` can't be written from a
+browser, and localStorage wouldn't follow the user to their phone. It stores
+parameters (what to walk), never computed signals, same principle as `prices`.
+RLS is on with open anon policies — the same effective access as `prices`,
+so anyone with the site can edit it; `js/strategy-store.js` escapes names on
+load for that reason. Until the SQL has been run the site falls back to
+`strategies.json`, read-only, and says so on the Developed tab.
 
 **Gotcha found 2026-09-06**: this Supabase project caps every response at
 1000 rows server-side (`db.max_rows`), regardless of an explicit
@@ -526,6 +542,24 @@ Twelve Data's own `/symbol_search` before wiring anything, not guessed:
   ETF inception (~2011), not the raw index.
 This mirrors the project's existing convention (SPY, not raw SPX, is what
 the live S&P strategy actually reads) rather than being a new pattern.
+
+Twelve Data behaviour the fetch code depends on (checked against the live API
+2026-09-28):
+- Free (Basic) plan: **8 credits per rolling minute, 800 per day**, 1 credit
+  per symbol per call — a comma-separated "batch" still costs one per symbol,
+  so batching saves nothing. `import-tools.js` paces its own calls to 8/min
+  and waits out one per-minute 429. The original 12-year-chunk backfill fired
+  10 calls in a burst, failed on the 9th, and discarded everything.
+- A range with more than 5000 rows returns the **newest** 5000, whatever
+  `order` says — so a full page means older rows remain, and paging goes
+  backwards.
+- A range with no trading days (a weekend top-up) is an error:
+  400 "No data is available on the specified dates" — treated as zero rows.
+- **Check history** (`/earliest_timestamp`, 1 credit per asset) finds what
+  Refresh can't, since Refresh only appends after the newest stored day:
+  older history than is stored, and internal gaps (>1 day for BTC, >5 for the
+  rest, with 9/11 week listed as a known closure). BTC before 2017-08-28 isn't
+  on Twelve Data at all — those rows came from the CoinMetrics CSV.
 
 Implementation notes worth keeping:
 - The binary strategy is not new logic — it's the engine's `fixedLeverage`

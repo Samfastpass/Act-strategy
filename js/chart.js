@@ -164,7 +164,7 @@ window.Chart = (function () {
     return ''
       + '<div class="chart-wrap">'
       + '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" preserveAspectRatio="xMidYMid meet" role="img" '
-      + 'aria-label="' + esc(strategy.name) + ' strategy versus buy and hold, log scale, shaded by position size">'
+      + 'aria-label="' + esc(strategy.rawName || strategy.name) + ' strategy versus buy and hold, log scale, shaded by position size">'
       + blocks
       + gridlines
       + '<path d="' + path("hold") + '" class="ch-hold"/>'

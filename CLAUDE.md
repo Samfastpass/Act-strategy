@@ -59,12 +59,19 @@ Key points not to relitigate:
   with `.range()` (see `loadAsset` in `js/app.js`) — the project caps
   responses at 1000 rows server-side regardless of requested range size.
 
-**File layout**: `strategies.json` is the single source of truth for
-strategy parameters (SMA length, buffer, vol gate, leverage, sizing mode,
-which asset each strategy live-tracks vs. backtests against) — both the
-Home and Developed-strategies tabs read from it. Home renders only
-`active: true` entries; Developed renders all, marking `archived: true`
-ones as Shelved. `js/strategy-engine.js` is one generic state-machine
+**File layout**: the strategies on the Home and Developed tabs live in the
+Supabase `strategies` table (`supabase/strategies.sql` creates and seeds it;
+`js/strategy-store.js` is the only code that reads or writes it). Each row's
+`def` is a strategies.json-shaped entry (SMA length, buffer, vol gate,
+leverage, sizing mode, which asset it live-tracks vs. backtests against, plus
+`latch`/`outLeverage`/`costAsset` for ones added from the Explorer), and
+`on_home` replaces the old `active` flag. `strategies.json` is now only the
+seed and the read-only fallback used until the table exists. Home renders
+`on_home` rows; Developed renders all (gross AND net-of-costs CAGR), marking
+`archived: true` ones as Shelved. `StrategyStore.fromConfig` is the one
+Explorer-config → strategy conversion; it's checked to reproduce the
+Evaluator's net CAGR exactly. The table is writable with the public anon key
+(same as `prices`), so row contents are untrusted — names are escaped on load. `js/strategy-engine.js` is one generic state-machine
 engine (`walk`, `computeStatus`, `backtestEquityCurve`, `cagr`)
 parameterized by those entries, supporting two position-sizing modes:
 the default `fixedLeverage` (discrete leverage, optionally vol-gated with

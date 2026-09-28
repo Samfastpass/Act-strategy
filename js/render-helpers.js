@@ -10,17 +10,23 @@ window.RenderHelpers = (function () {
   // "In / long, 100%" for vol-targeted sizing, "In / long, 5x" for a
   // gated leverage ratchet, plain "In / long" for a 1x crossover.
   function stateLabel(strategy, status) {
-    if (status.state === 0) return "Out / cash";
+    if (status.state === 0) return strategy.outLeverage ? "Out, holding " + strategy.outLeverage + "x" : "Out / cash";
     if (isVolTarget(strategy)) return "In / long, " + Math.round(status.state * 100) + "%";
-    if (strategy.leverage && strategy.leverage.gated != null) return "In / long, " + status.state + "x";
+    var lev = strategy.leverage || {};
+    if (lev.gated != null || lev.base > 1) return "In / long, " + status.state + "x";
     return "In / long";
   }
 
   function subline(strategy) {
     var bits = [strategy.smaLen + "d SMA"];
-    if (strategy.buffer) bits.push(fmt(strategy.buffer * 100, 0) + "% buffer");
+    if (strategy.buffer) bits.push(fmt(strategy.buffer * 100, 1).replace(/\.0$/, "") + "% buffer");
+    var lev = strategy.leverage || {};
     if (isVolTarget(strategy)) bits.push(fmt(strategy.sizing.volTarget * 100, 0) + "% vol target");
-    else if (strategy.volGate != null) bits.push("vol gate");
+    else if (strategy.volGate != null) {
+      bits.push(lev.base + "x&rarr;" + lev.gated + "x " + (strategy.latch === false ? "unlatched" : "latched")
+        + " at " + strategy.volLen + "d vol &ge; " + fmt(strategy.volGate * 100, 0) + "%");
+    } else if (lev.base > 1) bits.push(lev.base + "x");
+    if (strategy.outLeverage) bits.push(strategy.outLeverage + "x below the SMA");
     return bits.join(" &middot; ");
   }
 
@@ -38,6 +44,7 @@ window.RenderHelpers = (function () {
 
     var head = '<div class="card-head"><div><div class="name">' + strategy.name
       + (strategy.archived ? ' <span class="badge shelved">Shelved</span>' : '')
+      + (opts.homeBadge && strategy.active ? ' <span class="badge onhome">On Home</span>' : '')
       + '</div><div class="sub">' + subline(strategy) + '</div></div>'
       + '<span class="badge ' + badgeClass + '">' + stateLabel(strategy, status) + '</span></div>';
 
@@ -83,11 +90,13 @@ window.RenderHelpers = (function () {
     return html;
   }
 
-  function renderCagrRow(cagrs) {
+  // `heading` (optional) labels the row, e.g. gross vs net of costs.
+  function renderCagrRow(cagrs, heading) {
     function cell(label, val) {
       return '<div class="stat"><div class="k">' + label + '</div><div class="v">' + (val == null ? '&mdash;' : (val >= 0 ? '+' : '') + fmt(val, 1) + '%') + '</div></div>';
     }
-    return '<div class="statrow cagr-row">'
+    return (heading ? '<div class="cagr-heading">' + heading + '</div>' : '')
+      + '<div class="statrow cagr-row">'
       + cell('All-time', cagrs.allTime)
       + cell('10y', cagrs.y10)
       + cell('3y', cagrs.y3)
