@@ -232,6 +232,7 @@ window.Explorer = (function () {
     return '<div class="param-bar-head"><strong>Current strategy</strong>'
       + '<span class="toolsrow" style="margin:0;">Edit here, or click any matrix cell below to set its two parameters.</span>'
       + '<button class="winbtn" data-save-cfg="1" title="Save this strategy to the Evaluator tab to compare it across time periods">Save to Evaluator</button>'
+      + '<button class="winbtn" data-add-dev="1" title="Add this strategy to the Developed strategies tab (and from there, to Home)">Add to Developed</button>'
       + (asset.live ? '<button class="winbtn" data-reset-live="1" title="Set every parameter to the live strategy">Reset to live strategy</button>' : "")
       + '<span class="save-msg" id="save-msg"></span>'
       + '</div>'
@@ -599,6 +600,19 @@ window.Explorer = (function () {
       msg.className = "save-msg " + (res.error ? "err" : "ok");
       msg.textContent = res.error || ("Saved — see the Evaluator tab (" + SC.saved().length + " of " + SC.MAX_SAVED + ").");
       if (!res.error && window.App.refreshEvaluator) window.App.refreshEvaluator();
+    });
+    var devBtn = container.querySelector("[data-add-dev]");
+    if (devBtn) devBtn.addEventListener("click", async function () {
+      var msg = container.querySelector("#save-msg");
+      var cfg = curCfg();
+      var r = curCosts ? SC.resolve(cfg, curCosts) : { invalid: "costs not loaded yet" };
+      if (r.invalid) { msg.className = "save-msg err"; msg.textContent = "Can't add — " + r.invalid + "."; return; }
+      devBtn.disabled = true;
+      var res = await window.StrategyStore.addFromConfig(cfg, null, window.App.strategies());
+      devBtn.disabled = false;
+      msg.className = "save-msg " + (res.error ? "err" : "ok");
+      msg.textContent = res.error || "Added to the Developed strategies tab — use Show on Home there to put it on Home.";
+      if (!res.error) await window.App.onStrategiesChanged();
     });
 
     bind("[data-addm]", function () {

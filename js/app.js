@@ -58,14 +58,30 @@
 
   var state = { data: null, strategies: null, costAssumptions: null, refRates: null };
 
+  window.StrategyStore.init(sb);
+
   var ctx = {
     sb: sb,
     getData: function () { return state.data; },
     onImported: async function () {
       state.data = await loadAllData();
       renderAll();
+    },
+    // After a strategy is added, removed, or moved on/off Home.
+    onStrategiesChanged: async function () {
+      state.strategies = await window.StrategyStore.load();
+      renderStrategyTabs();
     }
   };
+
+  // The Explorer and Evaluator add strategies through this.
+  window.App.strategies = function () { return state.strategies || []; };
+  window.App.onStrategiesChanged = ctx.onStrategiesChanged;
+
+  function renderStrategyTabs() {
+    window.Home.render(panels.home, state.data, state.strategies, ctx);
+    window.Developed.render(panels.developed, state.data, state.strategies, ctx, state.costAssumptions, state.refRates);
+  }
 
   // The Explorer calls this after saving a strategy, so the Evaluator is up to
   // date the moment you switch to it.
@@ -77,8 +93,7 @@
     if (asofEl && state.data.btc.length) {
       asofEl.textContent = "as of " + state.data.btc[state.data.btc.length - 1].date + " close";
     }
-    window.Home.render(panels.home, state.data, state.strategies, ctx);
-    window.Developed.render(panels.developed, state.data, state.strategies, ctx);
+    renderStrategyTabs();
     window.Explorer.render(panels.explorer, state.data, state.costAssumptions, state.refRates, ctx);
     window.Evaluator.render(panels.evaluator, state.data, state.costAssumptions, state.refRates);
   }
@@ -91,6 +106,10 @@
     // edits), so it is re-rendered on show rather than left as whatever was
     // built at load. Its results are cached, so this is cheap.
     if (name === "evaluator") window.App.refreshEvaluator();
+    // Developed's net CAGRs use the same shared slippage tier / fee edits.
+    if (name === "developed" && state.data) {
+      window.Developed.render(panels.developed, state.data, state.strategies, ctx, state.costAssumptions, state.refRates);
+    }
     tabnav.querySelectorAll(".tab").forEach(function (btn) {
       btn.classList.toggle("active", btn.getAttribute("data-tab") === name);
     });
@@ -102,8 +121,7 @@
 
   async function init() {
     try {
-      var stratRes = await fetch("strategies.json");
-      state.strategies = await stratRes.json();
+      state.strategies = await window.StrategyStore.load();
       var costRes = await fetch("cost-assumptions.json");
       state.costAssumptions = await costRes.json();
       var refRes = await fetch("reference-rates.json");

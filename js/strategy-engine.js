@@ -274,15 +274,18 @@ window.StrategyEngine = (function () {
     return out;
   }
 
-  // Equity curve (starting at 1.0 at startIdx) for a strategy's own state,
-  // with no costs — the site's Developed-tab strategies aren't cost-modelled
-  // (only the explorer is), so this stays exactly as before.
-  function backtestEquityCurve(prices, params) {
+  // Equity curve (starting at 1.0 at startIdx) for a strategy's own state.
+  // `costs` is optional (compoundEquity's format): omitted, it is gross — the
+  // Developed tab shows both. params.outLeverage is what is held while the walk
+  // is OUT (a strategy added from the Explorer's below-SMA tier; 0 = cash).
+  function backtestEquityCurve(prices, params, costs) {
     var w = walk(prices, params);
     var n = w.closes.length;
     var firstIdx = w.startIdx;
     if (firstIdx >= n) return [];
-    return compoundEquity(prices, w.state, firstIdx, n - 1, null);
+    var out = params.outLeverage || 0;
+    var exposure = out ? w.state.map(function (s) { return s > 0 ? s : out; }) : w.state;
+    return compoundEquity(prices, exposure, firstIdx, n - 1, costs || null);
   }
 
   // CAGR % over the trailing `years` (or the whole curve if years is null).

@@ -65,6 +65,11 @@ window.Evaluator = (function () {
     };
   }
 
+  // Saved names are typed by the user, so they go into the page escaped.
+  function esc(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
   function cellText(s, metric) {
     if (!s || s.invalid) return { cls: "cell-na", html: '<span class="c-main">—</span>', v: null };
     if (s.insufficient) return { cls: "cell-na", html: '<span class="c-main">—</span>', v: null };
@@ -132,7 +137,7 @@ window.Evaluator = (function () {
         var s = r.cells[pi];
         var c = cellText(s, state.metric);
         var cls = c.cls || columnClass(c.v, colValues[pi]);
-        return '<td class="mcell ' + cls + '" title="' + tooltip(r.label, p, s).replace(/"/g, "&quot;") + '">' + c.html + '</td>';
+        return '<td class="mcell ' + cls + '" title="' + esc(tooltip(r.label, p, s)) + '">' + c.html + '</td>';
       }).join("");
 
       // Summary over the five decades only — the three spans overlap them, so
@@ -161,7 +166,7 @@ window.Evaluator = (function () {
       }
       return '<tr' + (isBench ? ' class="bench-row"' : '') + '>'
         + '<th class="ev-name">' + (isBench ? '<span class="muted">' + r.label + '</span>'
-            : '<span class="ev-title">' + r.label + '</span><span class="ev-sub">' + SC.assetConfig(r.entry.asset).label + ' · ' + SC.describe(r.entry, r.gs) + '</span>')
+            : '<span class="ev-title">' + esc(r.label) + '</span><span class="ev-sub">' + SC.assetConfig(r.entry.asset).label + ' · ' + SC.describe(r.entry, r.gs) + '</span>')
         + '</th>' + tds
         + '<td class="ev-sum">' + (mean == null ? "—" : (metric.signed && mean >= 0 ? "+" : "") + fmt(mean, metric.dp) + metric.unit) + '</td>'
         + '<td class="ev-sum">' + (anyRuin ? '<span style="color:var(--warn)">ruin</span>' : worst == null ? "—" : (metric.signed && worst >= 0 ? "+" : "") + fmt(worst, metric.dp) + metric.unit) + '</td>'
@@ -211,15 +216,18 @@ window.Evaluator = (function () {
         var gs = null;
         return '<div class="ev-item">'
           + (state.renaming === e.id
-            ? '<input class="ev-rename" data-rename-id="' + e.id + '" value="' + (e.name || "").replace(/"/g, "&quot;") + '" placeholder="name this strategy">'
-            : '<span class="ev-item-name">' + (e.name || SC.describe(e, null)) + '</span>')
+            ? '<input class="ev-rename" data-rename-id="' + e.id + '" value="' + esc(e.name || "") + '" placeholder="name this strategy">'
+            : '<span class="ev-item-name">' + esc(e.name || SC.describe(e, null)) + '</span>')
           + '<span class="ev-item-sub">' + SC.assetConfig(e.asset).label + ' · ' + SC.describe(e, null) + '</span>'
           + '<span class="ev-item-btns">'
           + '<button class="winbtn" data-move="' + e.id + '" data-dir="-1"' + (i === 0 ? " disabled" : "") + ' title="Move up">↑</button>'
           + '<button class="winbtn" data-move="' + e.id + '" data-dir="1"' + (i === list.length - 1 ? " disabled" : "") + ' title="Move down">↓</button>'
           + '<button class="winbtn" data-rename="' + e.id + '">' + (state.renaming === e.id ? "Done" : "Rename") + '</button>'
           + '<button class="winbtn" data-del="' + e.id + '" title="Remove this saved strategy">Remove</button>'
-          + '</span></div>';
+          + '<button class="winbtn" data-add-dev="' + e.id + '" title="Add it to the Developed strategies tab (and from there, to Home)">Add to Developed</button>'
+          + '</span>'
+          + (state.devMsg && state.devMsg.id === e.id ? '<span class="save-msg ' + state.devMsg.cls + '">' + esc(state.devMsg.text) + '</span>' : '')
+          + '</div>';
       }).join("") + '</div>'
       + '<div class="toolsrow">Up to ' + SC.MAX_SAVED + ' strategies, kept in this browser only (local storage) — not in the repo, and not synced between devices. '
       + 'Costs use the slippage tier and any fee edits set on the Strategy Explorer tab, so both tabs always agree.</div>'
@@ -234,6 +242,20 @@ window.Evaluator = (function () {
       });
     }
     bind("[data-ev-metric]", function (el) { state.metric = el.getAttribute("data-ev-metric"); });
+    container.querySelectorAll("[data-add-dev]").forEach(function (el) {
+      el.addEventListener("click", async function () {
+        var id = el.getAttribute("data-add-dev");
+        var e = SC.saved().filter(function (x) { return x.id === id; })[0];
+        if (!e) return;
+        var r = SC.resolve(e, SC.costConfigFor(costAssumptions, e.asset));
+        var res = r.invalid ? { error: "Can't add — " + r.invalid + "." }
+          : (el.disabled = true, await window.StrategyStore.addFromConfig(e, e.name || null, window.App.strategies()));
+        state.devMsg = { id: id, cls: res.error ? "err" : "ok",
+                         text: res.error || "Added to Developed strategies — use Show on Home there to put it on Home." };
+        if (!res.error) await window.App.onStrategiesChanged();
+        rerender();
+      });
+    });
     bind("[data-del]", function (el) { SC.remove(el.getAttribute("data-del")); state.renaming = null; });
     bind("[data-move]", function (el) { SC.reorder(el.getAttribute("data-move"), Number(el.getAttribute("data-dir"))); });
     bind("[data-rename]", function (el) {
