@@ -17,8 +17,10 @@ window.ImportTools = (function () {
   // three new explorer assets) — it's where a first-ever fetch starts from.
   // Existing assets (BTC/SPY) always have rows already, so they ignore it
   // and refresh from their last stored date instead.
+  // everyDay: trades every calendar day, so any 2+-day gap is missing data
+  // (the history check's gap scan); others allow weekends plus holidays.
   var TWELVEDATA_SYMBOLS = {
-    BTC: { symbol: "BTC/USD" },
+    BTC: { symbol: "BTC/USD", everyDay: true },
     SPY: { symbol: "SPY" },
     GOLD: { symbol: "XAU/USD", backfillFrom: "1990-01-01" },
     // QQQ and S100 are real, liquid ETF proxies confirmed against Twelve
@@ -44,6 +46,9 @@ window.ImportTools = (function () {
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().slice(0, 10);
   }
+  function dayDiff(a, b) {
+    return Math.round((new Date(b + "T00:00:00Z") - new Date(a + "T00:00:00Z")) / 864e5);
+  }
   function todayUTC() { return new Date().toISOString().slice(0, 10); }
 
   // The free (Basic) plan allows 8 API credits per rolling minute and 800 per
@@ -68,11 +73,10 @@ window.ImportTools = (function () {
     }
   }
 
-  async function fetchTwelveData(symbolCfg, startDate, endDate, apiKey, onWait) {
-    var url = "https://api.twelvedata.com/time_series"
-      + "?symbol=" + encodeURIComponent(symbolCfg.symbol)
-      + "&interval=1day&order=ASC&format=JSON&outputsize=" + MAX_POINTS
-      + "&start_date=" + startDate + "&end_date=" + endDate
+  // One paced Twelve Data call. Throws on an API error, with its `code`.
+  async function tdGet(endpoint, symbolCfg, query, apiKey, onWait) {
+    var url = "https://api.twelvedata.com/" + endpoint
+      + "?symbol=" + encodeURIComponent(symbolCfg.symbol) + "&interval=1day" + query
       + "&apikey=" + encodeURIComponent(apiKey);
     if (symbolCfg.exchange) url += "&exchange=" + encodeURIComponent(symbolCfg.exchange);
     if (symbolCfg.mic) url += "&mic_code=" + encodeURIComponent(symbolCfg.mic);
@@ -80,23 +84,68 @@ window.ImportTools = (function () {
       await waitForCredit(onWait);
       var res = await fetch(url);
       var json = await res.json();
-      if (json.status === "error") {
-        // Credits used elsewhere (another tab, another app on the same key)
-        // aren't in callTimes — on a per-minute 429, wait out the minute once.
-        if (json.code === 429 && attempt === 0 && /minute/i.test(json.message || "")) {
-          callTimes = [];
-          for (var s = 61; s > 0; s--) { if (onWait) onWait(s); await sleep(1000); }
-          continue;
-        }
-        // A top-up whose whole range is a weekend or holiday comes back as a
-        // 400 "No data is available on the specified dates" — that's "nothing
-        // new", not a failure.
-        if (json.code === 400 && /no data is available/i.test(json.message || "")) return [];
-        throw new Error(json.message || "Twelve Data error");
+      if (json.status !== "error") return json;
+      // Credits used elsewhere (another tab, another app on the same key)
+      // aren't in callTimes — on a per-minute 429, wait out the minute once.
+      if (json.code === 429 && attempt === 0 && /minute/i.test(json.message || "")) {
+        callTimes = [];
+        for (var s = 61; s > 0; s--) { if (onWait) onWait(s); await sleep(1000); }
+        continue;
       }
-      if (!json.values) return [];
-      return json.values.map(function (v) { return { date: v.datetime.slice(0, 10), close: parseFloat(v.close) }; });
+      var err = new Error(json.message || "Twelve Data error");
+      err.code = json.code;
+      throw err;
     }
+  }
+
+  async function fetchTwelveData(symbolCfg, startDate, endDate, apiKey, onWait) {
+    var json;
+    try {
+      json = await tdGet("time_series", symbolCfg, "&order=ASC&format=JSON&outputsize=" + MAX_POINTS
+        + "&start_date=" + startDate + "&end_date=" + endDate, apiKey, onWait);
+    } catch (e) {
+      // A top-up whose whole range is a weekend or holiday comes back as a
+      // 400 "No data is available on the specified dates" — that's "nothing
+      // new", not a failure.
+      if (e.code === 400 && /no data is available/i.test(e.message)) return [];
+      throw e;
+    }
+    if (!json.values) return [];
+    return json.values.map(function (v) { return { date: v.datetime.slice(0, 10), close: parseFloat(v.close) }; });
+  }
+
+  // The first date Twelve Data has for a symbol (1 credit).
+  async function fetchEarliest(symbolCfg, apiKey, onWait) {
+    var json = await tdGet("earliest_timestamp", symbolCfg, "", apiKey, onWait);
+    if (!json.datetime) throw new Error("no earliest date returned");
+    return json.datetime.slice(0, 10);
+  }
+
+  // Exchange closures longer than the gap scan's allowance, so they aren't
+  // offered as "missing" (fetching them would spend a credit to get nothing).
+  var KNOWN_CLOSURES = [
+    { from: "2001-09-10", to: "2001-09-17", why: "US markets closed after 9/11" }
+  ];
+
+  // Stretches of missing rows in an ascending price series: a gap of more
+  // than 1 calendar day for an every-day asset, more than 5 otherwise (a
+  // weekend plus two holidays is 5). Only gaps Twelve Data could fill — after
+  // its earliest date — are returned; the stored rows before that came from
+  // another source.
+  function findGaps(rows, everyDay, earliest) {
+    var maxDays = everyDay ? 1 : 5;
+    var gaps = [];
+    for (var i = 1; i < rows.length; i++) {
+      var a = rows[i - 1].date, b = rows[i].date;
+      var days = dayDiff(a, b);
+      if (days <= maxDays || b <= earliest) continue;
+      if (KNOWN_CLOSURES.some(function (c) { return c.from === a && c.to === b; })) continue;
+      var from = addDaysUTC(a, 1);
+      if (from < earliest) from = earliest;
+      var to = addDaysUTC(b, -1);
+      gaps.push({ from: from, to: to, days: dayDiff(from, to) + 1 });
+    }
+    return gaps;
   }
 
   // One call covers up to 5000 rows (~20 years of trading days, ~13 of BTC's
@@ -161,6 +210,11 @@ window.ImportTools = (function () {
       + '<button class="add" id="td-clear-key" style="background:var(--card); color:var(--ink); border-color:var(--line);">Clear key</button>'
       + '<button class="add" id="td-refresh-btn">Refresh</button>'
       + '</div>'
+      + '<div style="margin-top:8px; font-size:12px; color:var(--ink-soft);">'
+      + '<button class="add" id="td-check-btn" style="background:var(--card); color:var(--ink); border-color:var(--line);">Check history</button>'
+      + ' finds older history Twelve Data has and gaps in what\'s stored (1 call per asset; nothing is fetched until you choose)'
+      + '</div>'
+      + '<div id="td-check" style="display:none; margin-top:10px; font-size:12px;"></div>'
       + '<div id="td-status" class="errtext" style="display:none;"></div>'
       + '<div id="td-preview" style="display:none; margin-top:10px;">'
       + '<div id="td-preview-body" style="font-size:12px; color:var(--ink-soft);"></div>'
@@ -208,6 +262,8 @@ window.ImportTools = (function () {
     var tdPreview = container.querySelector("#td-preview");
     var tdPreviewBody = container.querySelector("#td-preview-body");
     var tdConfirmBtn = container.querySelector("#td-confirm-btn");
+    var checkBtn = container.querySelector("#td-check-btn");
+    var tdCheck = container.querySelector("#td-check");
 
     apiKeyInput.value = getSavedApiKey();
     apiKeyInput.addEventListener("change", function () { saveApiKey(apiKeyInput.value.trim()); });
@@ -233,11 +289,7 @@ window.ImportTools = (function () {
         var end = todayUTC();
         var results = {};
         var lines = [];
-        var onWait = function (secs) {
-          refreshBtn.textContent = "Waiting " + secs + "s…";
-          showStatus(tdStatus, "Pausing for Twelve Data's free-plan limit (" + CREDITS_PER_MINUTE
-            + " calls a minute) — it'll carry on by itself.", false);
-        };
+        var onWait = waitReporter(refreshBtn);
         for (var asset in TWELVEDATA_SYMBOLS) {
           var cfg = TWELVEDATA_SYMBOLS[asset];
           var existing = data[window.App.assetKey(asset)] || [];
@@ -261,16 +313,146 @@ window.ImportTools = (function () {
             lines.push(asset + ": couldn't fetch — " + e.message);
           }
         }
-        pendingTd = results;
-        tdPreviewBody.textContent = "";
-        lines.forEach(function (l) { tdPreviewBody.appendChild(document.createTextNode(l)); tdPreviewBody.appendChild(document.createElement("br")); });
-        tdPreview.style.display = "block";
+        showPreview(results, lines);
       } catch (e) {
         showStatus(tdStatus, "Couldn't fetch: " + e.message, true);
       } finally {
         refreshBtn.disabled = false; refreshBtn.textContent = "Refresh";
       }
     });
+
+    // Lines can carry API error text, so they go in as text, never HTML.
+    function showPreview(results, lines) {
+      pendingTd = results;
+      tdPreviewBody.textContent = "";
+      lines.forEach(function (l) { tdPreviewBody.appendChild(document.createTextNode(l)); tdPreviewBody.appendChild(document.createElement("br")); });
+      tdPreview.style.display = "block";
+    }
+
+    function waitReporter(btn) {
+      return function (secs) {
+        btn.textContent = "Waiting " + secs + "s…";
+        showStatus(tdStatus, "Pausing for Twelve Data's free-plan limit (" + CREDITS_PER_MINUTE
+          + " calls a minute) — it'll carry on by itself.", false);
+      };
+    }
+
+    // History check: step 1 asks Twelve Data for each symbol's earliest date
+    // and scans the stored rows for gaps, then lists what could be fetched as
+    // ticked boxes; step 2 fetches only the ticked ranges into the normal
+    // import preview. Refresh can't find either — it only appends after the
+    // newest stored day.
+    checkBtn.addEventListener("click", async function () {
+      var apiKey = apiKeyInput.value.trim();
+      if (!apiKey) { showStatus(tdStatus, "Add your Twelve Data API key first.", true); return; }
+      hideStatus(tdStatus);
+      tdPreview.style.display = "none";
+      tdCheck.style.display = "none";
+      checkBtn.disabled = true;
+      var onWait = waitReporter(checkBtn);
+      var data = ctx.getData();
+      var today = todayUTC();
+      var notes = [];
+      var ranges = [];
+      try {
+        for (var asset in TWELVEDATA_SYMBOLS) {
+          var cfg = TWELVEDATA_SYMBOLS[asset];
+          var rows = data[window.App.assetKey(asset)] || [];
+          checkBtn.textContent = "Checking " + asset + "…";
+          var earliest;
+          try {
+            earliest = await fetchEarliest(cfg, apiKey, onWait);
+            hideStatus(tdStatus);
+          } catch (e) {
+            notes.push(asset + ": couldn't check — " + e.message);
+            continue;
+          }
+          if (!rows.length) {
+            ranges.push({ asset: asset, from: earliest, to: today, what: "full history — nothing stored yet" });
+            notes.push(asset + ": nothing stored; Twelve Data has it from " + earliest);
+            continue;
+          }
+          var first = rows[0].date;
+          var found = 0;
+          if (earliest < first) {
+            ranges.push({ asset: asset, from: earliest, to: addDaysUTC(first, -1), what: "older history" });
+            found++;
+          }
+          findGaps(rows, cfg.everyDay, earliest).forEach(function (g) {
+            ranges.push({ asset: asset, from: g.from, to: g.to, what: "gap, " + g.days + " day(s) missing" });
+            found++;
+          });
+          notes.push(asset + ": stored " + first + " → " + rows[rows.length - 1].date
+            + "; Twelve Data from " + earliest
+            + (earliest > first ? " (older rows came from another source)" : "")
+            + (found ? "" : " — nothing missing"));
+        }
+        renderCheck(notes, ranges);
+      } catch (e) {
+        showStatus(tdStatus, "Couldn't check: " + e.message, true);
+      } finally {
+        checkBtn.disabled = false; checkBtn.textContent = "Check history";
+      }
+    });
+
+    function renderCheck(notes, ranges) {
+      tdCheck.textContent = "";
+      notes.forEach(function (n) {
+        var d = document.createElement("div");
+        d.style.color = "var(--ink-soft)";
+        d.textContent = n;
+        tdCheck.appendChild(d);
+      });
+      if (ranges.length) {
+        var boxes = ranges.map(function (r) {
+          var label = document.createElement("label");
+          label.style.cssText = "display:block; margin-top:6px; color:var(--ink);";
+          var cb = document.createElement("input");
+          cb.type = "checkbox"; cb.checked = true;
+          label.appendChild(cb);
+          label.appendChild(document.createTextNode(" " + r.asset + ": " + r.from + " → " + r.to + " (" + r.what + ")"));
+          tdCheck.appendChild(label);
+          return cb;
+        });
+        var fetchBtn = document.createElement("button");
+        fetchBtn.className = "add";
+        fetchBtn.style.marginTop = "8px";
+        fetchBtn.textContent = "Fetch selected";
+        fetchBtn.addEventListener("click", function () {
+          fetchRanges(ranges.filter(function (r, i) { return boxes[i].checked; }), fetchBtn);
+        });
+        tdCheck.appendChild(fetchBtn);
+      }
+      tdCheck.style.display = "block";
+    }
+
+    async function fetchRanges(ranges, btn) {
+      if (!ranges.length) return;
+      var apiKey = apiKeyInput.value.trim();
+      btn.disabled = true;
+      var onWait = waitReporter(btn);
+      var results = {};
+      var lines = [];
+      try {
+        for (var i = 0; i < ranges.length; i++) {
+          var r = ranges[i];
+          btn.textContent = "Fetching " + r.asset + "…";
+          try {
+            var rows = await fetchTwelveDataRange(TWELVEDATA_SYMBOLS[r.asset], r.from, r.to, apiKey, onWait);
+            hideStatus(tdStatus);
+            results[r.asset] = (results[r.asset] || []).concat(rows);
+            lines.push(r.asset + " " + r.from + " → " + r.to + ": " + rows.length + " day(s)"
+              + (rows.length ? "" : " — Twelve Data has none in this range (likely a market closure)"));
+          } catch (e) {
+            lines.push(r.asset + " " + r.from + " → " + r.to + ": couldn't fetch — " + e.message);
+          }
+        }
+        tdCheck.style.display = "none";
+        showPreview(results, lines);
+      } finally {
+        btn.disabled = false; btn.textContent = "Fetch selected";
+      }
+    }
 
     tdConfirmBtn.addEventListener("click", async function () {
       if (!pendingTd) return;
