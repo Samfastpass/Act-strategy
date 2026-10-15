@@ -13,6 +13,9 @@ window.Developed = (function () {
   // Persist across re-renders (a data refresh re-runs render()).
   var selectedId = null;
   var chartYears = 5;
+  // A window taken from a chart zoom ({ from, to }, to exclusive); overrides
+  // chartYears until cleared, a year button is pressed, or another card opens.
+  var chartRange = null;
   var WINDOWS = [
     { label: "1y", years: 1 }, { label: "3y", years: 3 }, { label: "5y", years: 5 },
     { label: "10y", years: 10 }, { label: "All", years: null }
@@ -70,18 +73,25 @@ window.Developed = (function () {
 
   function detailPanel(a) {
     var buttons = WINDOWS.map(function (w) {
-      return '<button class="winbtn' + (w.years === chartYears ? " active" : "") + '" data-years="'
+      return '<button class="winbtn' + (!chartRange && w.years === chartYears ? " active" : "") + '" data-years="'
         + (w.years == null ? "all" : w.years) + '">' + w.label + '</button>';
-    }).join("");
+    }).join("")
+      + (chartRange ? '<button class="winbtn active" data-range-clear="1" title="Back to the year buttons">' + rangeLabel(chartRange) + ' &times;</button>' : '');
+    // The chart's zoom is offered as its window; it resets when what's on screen changes.
+    window.Plot.linkKey("developed", a.strategy.id + "|" + (chartRange ? rangeLabel(chartRange) : chartYears));
 
     return '<div class="panel detail">'
       + '<div class="detail-head"><h2>' + a.strategy.name + ' &mdash; strategy vs. buy &amp; hold</h2>'
       + '<div class="winbtns">' + buttons + '</div></div>'
-      + window.Chart.render(a.strategy, a.backtestPrices, a.equity, a.backtestWalk, chartYears)
+      + window.Chart.render(a.strategy, a.backtestPrices, a.equity, a.backtestWalk, chartYears, chartRange)
       + '<div class="toolsrow">Backtested on ' + a.strategy.backtestAsset + ' &middot; '
       + a.backtestPrices.length + ' days on record'
       + (a.strategy.execution ? ' &middot; ' + a.strategy.execution : '')
       + '</div>'
+      + '</div>'
+      + '<div class="zoom-bar" id="dev-zoombar" hidden><span>Zoomed to <strong class="zb-range"></strong></span>'
+      + '<button class="winbtn active" data-dev-zoom-apply="1" title="Redraw the chart from this range, rebased to 1× on its first day">Use as the window</button>'
+      + '<span class="muted">double-click the chart to zoom out</span></div>'
       + '</div>'
       + RH.renderOddsTable(a.odds);
   }
@@ -124,6 +134,7 @@ window.Developed = (function () {
       function toggle() {
         var id = card.getAttribute("data-strategy-id");
         selectedId = (selectedId === id) ? null : id;
+        chartRange = null;
         rerender();
       }
       card.addEventListener("click", function (e) { if (!e.target.closest(".card-actions")) toggle(); });
@@ -137,6 +148,7 @@ window.Developed = (function () {
       btn.addEventListener("click", function () {
         var v = btn.getAttribute("data-years");
         chartYears = v === "all" ? null : Number(v);
+        chartRange = null;
         rerender();
       });
     });
@@ -166,8 +178,35 @@ window.Developed = (function () {
     });
 
     window.ImportTools.wireUp(container, ctx);
+    var clearBtn = container.querySelector("[data-range-clear]");
+    if (clearBtn) clearBtn.addEventListener("click", function () { chartRange = null; rerender(); });
+    var zoomBar = container.querySelector("#dev-zoombar");
+    function showZoom(range) {
+      if (!zoomBar) return;
+      zoomBar.hidden = !range;
+      if (range) zoomBar.querySelector(".zb-range").textContent = range[0] + " → " + range[1];
+    }
+    window.Plot.onRange("developed", showZoom);
+    showZoom(window.Plot.groupRange("developed"));
+    var applyBtn = container.querySelector("[data-dev-zoom-apply]");
+    if (applyBtn) applyBtn.addEventListener("click", function () {
+      var r = window.Plot.groupRange("developed");
+      var a = analyses.filter(function (x) { return !x.missing && x.strategy.id === selectedId; })[0];
+      if (!r || !a) return;
+      var last = a.backtestPrices[a.backtestPrices.length - 1].date;
+      chartRange = { from: r[0], to: r[1] >= last ? null : shiftDay(r[1], 1) };
+      rerender();
+    });
+
     window.Plot.mount(container);
   }
+
+  function shiftDay(d, n) {
+    var t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n);
+    return t.toISOString().slice(0, 10);
+  }
+  // `to` is exclusive; the label shows the last day included.
+  function rangeLabel(r) { return (r.from || "start") + " → " + (r.to ? shiftDay(r.to, -1) : "today"); }
 
   return { render: render };
 })();

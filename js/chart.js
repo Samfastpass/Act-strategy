@@ -26,7 +26,9 @@ window.Chart = (function () {
   var MAIN_DOMAIN = [0.27, 1], STRIP_DOMAIN = [0, 0.15];
   var TARGET_POINTS = 2400;
 
-  function render(strategy, prices, equityCurve, walkResult, years) {
+  // `years` = trailing window (null = all); `range` = { from, to } (to
+  // exclusive, either may be null) taken from a chart zoom, which wins.
+  function render(strategy, prices, equityCurve, walkResult, years, range) {
     if (!equityCurve.length) return '<div class="loading">Not enough history to chart.</div>';
 
     var lastDate = equityCurve[equityCurve.length - 1].date;
@@ -39,6 +41,7 @@ window.Chart = (function () {
     prices.forEach(function (p, i) { stateByDate[p.date] = walkResult.state[i]; });
 
     var pts = equityCurve.filter(function (e) {
+      if (range) return (!range.from || e.date >= range.from) && (!range.to || e.date < range.to);
       return cutoff == null || new Date(e.date) >= cutoff;
     });
     if (pts.length < 2) return '<div class="loading">Not enough history for this window.</div>';
@@ -97,7 +100,7 @@ window.Chart = (function () {
       : "Exposure (0–" + fmt(maxState, 0) + "×)";
 
     var slot = Plot.slot({
-      height: 330, key: "developed-equity", legendScope: ".chart-wrap",
+      height: 330, key: "developed-equity", group: "developed", legendScope: ".chart-wrap",
       label: (strategy.rawName || strategy.name) + " strategy versus buy and hold, log scale, shaded by position size",
       build: function (t) {
         var stepLine = { width: 0, shape: "hv" };
