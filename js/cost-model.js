@@ -79,8 +79,10 @@ window.CostModel = (function () {
   }
 
   // Annualised drag of a product at a given leverage and base rate, for
-  // display ("what does 5x cost me a year at today's rates?"). Not used in
-  // any calculation — the daily loop is the source of truth.
+  // display ("what does 5x cost me a year at today's rates?") and for the
+  // cost cap's decision of how much leverage to hold
+  // (StrategyEngine.costCapLimits). Never used to compute equity — the daily
+  // loop is the source of truth for that.
   function annualDrag(exposure, baseRatePct, product) {
     var p = product || {};
     var charges = ((p.mgmtFeePct || 0) / 100 * 365 / 360 + (p.dailySwapRatePct || 0) / 100 * 365) * Math.min(exposure, 1);

@@ -105,6 +105,16 @@
   .ch-legend i { display: inline-block; width: 10px; height: 2px; margin-right: 5px; vertical-align: middle; }
   .ch-legend .sw-strat { background: var(--long); }
   .ch-legend .sw-hold { background: var(--ink-faint); }
+  .ch-legend .sw-fc-cap { background: repeating-linear-gradient(90deg, var(--ink) 0 2px, transparent 2px 4px); }
+  /* Cost-cap switch + slider in the Explorer's parameter bar. */
+  /* Overrides .pb-field's text-input styling, which would stretch the
+     checkbox and slider to full-width boxes. */
+  .cap-ctl { display: flex; align-items: center; gap: 6px; height: 30px; min-width: 0; }
+  .pb-field .cap-switch { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 11px; color: var(--ink-soft); cursor: pointer; white-space: nowrap; }
+  .pb-field .cap-ctl input[type="checkbox"] { width: 15px; height: 15px; padding: 0; margin: 0; border: 0; accent-color: var(--long); flex: none; }
+  .pb-field .cap-ctl input[type="range"] { flex: 1 1 auto; width: auto; min-width: 0; height: auto; padding: 0; border: 0; background: none; accent-color: var(--long); }
+  .pb-field .cap-ctl input[type="range"]:disabled { opacity: 0.35; }
+  .cap-val { font-family: var(--mono); color: var(--ink); }
   .ch-legend .sw-gross { background: repeating-linear-gradient(90deg, var(--long) 0 3px, transparent 3px 6px); opacity: 0.7; }
   .ch-note { color: var(--ink-faint); font-style: italic; }
   /* Plotly charts (js/plot.js). */

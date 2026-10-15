@@ -44,9 +44,11 @@ window.Developed = (function () {
     if (!livePrices || !livePrices.length || !backtestPrices || !backtestPrices.length) {
       return { strategy: strategy, missing: true };
     }
-    var status = Engine.computeStatus(livePrices, strategy);
-    var equity = Engine.backtestEquityCurve(backtestPrices, strategy);
     var ec = netCosts(strategy, costAssumptions, refRates);
+    // A cost cap decides positions from real rates and products, so even the
+    // gross curve is given `ec` to decide with (it just isn't charged costs).
+    var status = Engine.computeStatus(livePrices, strategy, ec);
+    var equity = Engine.backtestEquityCurve(backtestPrices, strategy, null, ec);
     var netEquity = ec ? Engine.backtestEquityCurve(backtestPrices, strategy, ec) : null;
     // Buy & hold for the chart: 1x, cost-free, but with dividends reinvested
     // when the series is price-only (as on the Explorer) — the strategy
@@ -61,6 +63,11 @@ window.Developed = (function () {
     // Odds come from the backtest series (more history) using that series'
     // own walk, so episodes and extensions line up with the equity curve.
     var backtestWalk = Engine.walk(backtestPrices, strategy);
+    if (strategy.costCap > 0 && ec) {
+      // What was actually held each day, for the chart's blocks and strip.
+      var capAt = Engine.costCapLimits(backtestPrices, strategy.costCap, ec), outL = strategy.outLeverage || 0;
+      backtestWalk.held = backtestWalk.state.map(function (st, i) { return Math.min(st > 0 ? st : outL, capAt[i]); });
+    }
     var backtestStatus = Engine.computeStatus(backtestPrices, strategy);
     return {
       strategy: strategy, status: status, equity: equity, netEquity: netEquity, hold: hold,

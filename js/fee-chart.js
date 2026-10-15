@@ -42,6 +42,8 @@ window.FeeChart = (function () {
   //   divFn: (dateStr) -> yield pct or null
   //   from, to: date strings bounding the chart
   //   productName, quotedCharge: display strings / number (platform "ongoing charge" = fee + swap x 360)
+  //   cap: the strategy's cost cap, % a year (0 = off) — drawn as a line: in
+  //        months where the all-in line is above it, the cap holds less leverage
   // }
   function render(o) {
     var L = o.primary.exposure;
@@ -122,6 +124,10 @@ window.FeeChart = (function () {
         if (o.divFn) notes.push(endNote(prim[last].div, "dividends " + fmt(prim[last].div, 1) + "%", t.long, close ? -8 : 0));
         if (sec) notes.push(endNote(sec[last].total, "at " + o.secondary.exposure + "× " + fmt(sec[last].total, 1) + "%", t.flat, 0));
         var shapes = [];
+        if (o.cap > 0) {
+          shapes.push({ type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: o.cap, y1: o.cap, line: { color: t.ink, width: 1, dash: "dot" } });
+          notes.push({ text: "cost cap " + o.cap + "%", x: 0, xref: "paper", y: o.cap, yref: "y", xanchor: "left", yanchor: "bottom", xshift: 4, showarrow: false, font: { size: 10, color: t.ink } });
+        }
         if (heldTo) {
           shapes.push({ type: "rect", xref: "x", yref: "paper", x0: xs[0], x1: heldTo, y0: 0, y1: 1, line: { width: 0 }, fillcolor: t.alpha(t.inkFaint, 0.12), layer: "below" });
           notes.push({ text: "rate held at " + o.rateEarliest.slice(0, 4) + " level", x: xs[0], xref: "x", y: 1, yref: "paper", xanchor: "left", yanchor: "top", xshift: 4, showarrow: false, font: { size: 10, color: t.inkFaint } });
@@ -144,6 +150,7 @@ window.FeeChart = (function () {
       + '<span data-trace="' + idx.total + '"><i class="sw-fc-total"></i>All-in at ' + L + '×</span>'
       + (sec ? '<span data-trace="' + idx.low + '"><i class="sw-fc-low"></i>All-in at ' + o.secondary.exposure + '× (after a vol latch-down)</span>' : '')
       + (o.divFn ? '<span data-trace="' + idx.div + '"><i class="sw-fc-div"></i>Dividends received (yield × ' + L + ')</span>' : '')
+      + (o.cap > 0 ? '<span><i class="sw-fc-cap"></i>Cost cap &le;' + o.cap + '%/yr &mdash; above it, the strategy holds less leverage</span>' : '')
       + '<span class="ch-note">% of capital per year, while invested</span>'
       + '</div>';
 

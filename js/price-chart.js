@@ -29,12 +29,15 @@ window.PriceChart = (function () {
 
     var sma = wk.sma, state = wk.state; // 0/1 for a binary walk (at 1x); real leverage multiples when wk.gated
 
-    // Level per day: 2 = full leverage, 1 = reduced (a vol-gated strategy
-    // that has latched down), 0 = out. The reduced level is drawn at half
-    // height (amber) so the difference is not carried by colour alone.
+    // Level per day: 2 = full leverage, 1 = reduced (latched down by the vol
+    // gate, or trimmed by the cost cap), 0 = out. Read from the leverage
+    // actually held (StrategyEngine.exposureAt), so the cap shows. The reduced
+    // level is drawn at half height (amber) so it is not carried by colour alone.
+    var fullLev = wk.gated ? wk.high : leverage;
+    function held(j) { return window.StrategyEngine.exposureAt(wk, j, leverage); }
     function level(j) {
       if (!(state[j] > 0)) return 0;
-      return wk.gated && state[j] !== wk.high ? 1 : 2;
+      return held(j) < fullLev ? 1 : 2;
     }
     var inCount = 0, reducedCount = 0, episodes = 0, prevLevel = 0;
     for (var j = lo; j <= hi; j++) {
@@ -51,8 +54,10 @@ window.PriceChart = (function () {
 
     // What is held on a given day, for the hover readout.
     function heldText(k) {
-      if (!(state[k] > 0)) return wk.out > 0 ? "below the SMA, holding " + wk.out + "×" : "out, in cash";
-      return "in at " + (wk.gated ? state[k] : leverage) + "×";
+      var h = held(k);
+      if (!(state[k] > 0)) return wk.out > 0 ? "below the SMA, holding " + h + "×" + (h < wk.out ? " (cost cap)" : "") : "out, in cash";
+      var walkLev = wk.gated ? state[k] : leverage;
+      return "in at " + h + "×" + (h < walkLev ? " (cost cap; rules say " + walkLev + "×)" : "");
     }
 
     var n = hi - lo + 1;
@@ -111,12 +116,15 @@ window.PriceChart = (function () {
       + '<span data-trace="4"><i class="sw-sma"></i>' + smaLen + 'd SMA</span>'
       + (buffer > 0 ? '<span data-trace="2,3"><i class="sw-band"></i>&plusmn;' + bufferPct + '% buffer</span>' : '')
       + (wk.gated
-        ? '<span data-trace="0"><i class="sw-inblock"></i>In at ' + wk.high + '× (full height)</span><span data-trace="1"><i class="sw-downblock"></i>Latched to ' + wk.low + '× (half height)</span>'
-        : '<span data-trace="0"><i class="sw-inblock"></i>In the market</span>')
+        ? '<span data-trace="0"><i class="sw-inblock"></i>In at ' + wk.high + '× (full height)</span><span data-trace="1"><i class="sw-downblock"></i>'
+          + (wk.capAt ? 'Reduced &mdash; vol latch or cost cap' : 'Latched to ' + wk.low + '×') + ' (half height)</span>'
+        : '<span data-trace="0"><i class="sw-inblock"></i>In the market' + (wk.capAt ? ' at ' + leverage + '× (full height)' : '') + '</span>'
+          + (wk.capAt ? '<span data-trace="1"><i class="sw-downblock"></i>Cut by the cost cap (half height)</span>' : ''))
       + '<span class="ch-note">' + (wk.out > 0 ? 'unshaded = below the SMA, held at ' + wk.out + '&times;' : 'unshaded = out, in cash') + ' &middot; log scale</span>'
       + '</div>'
       + '<div class="toolsrow">' + (wk.out > 0 ? 'Above the trend signal' : 'In the market') + ' ' + fmt(pctIn, 0) + '% of this period across ' + episodes + ' episodes'
-      + (wk.gated ? ', ' + fmt(100 * reducedCount / Math.max(1, inCount), 0) + '% of that time at the reduced ' + wk.low + '×' : '') + '. '
+      + (wk.capAt ? ', ' + fmt(100 * reducedCount / Math.max(1, inCount), 0) + '% of that time at reduced leverage'
+         : wk.gated ? ', ' + fmt(100 * reducedCount / Math.max(1, inCount), 0) + '% of that time at the reduced ' + wk.low + '×' : '') + '. '
       + 'The strategy buys when price closes above the upper band and sells when it closes below the lower one; '
       + 'between the bands it simply holds whatever it already had.</div>'
       + '</div>';

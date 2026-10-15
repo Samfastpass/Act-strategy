@@ -589,6 +589,40 @@ later recover. This fires for no live strategy (their worst-ever daily
 factor is 0.601), so it changed no existing number; it exists because the
 explorer's high-leverage sweeps hit it constantly.
 
+## Cost cap (added 2026-10-15)
+An optional strategy parameter, `cap` (%/yr, 0 = off, the default): never hold
+more leverage than would cost that much a year all-in (fees + financing at
+that month's Fed Funds/SONIA, via `CostModel.annualDrag` on the product that
+would be held). Each day the most allowed is the highest of 1/2/3/5× within
+the cap, never below 1×; it trims whatever the walk says to hold, in or out,
+and never changes the walk (`StrategyEngine.costCapLimits` + `exposureAt`'s
+`wk.capAt`; `backtestEquityCurve`/`computeStatus` take `params.costCap`).
+Because it DECIDES positions, the gross curve is computed on the same capped
+positions (`decisionCosts`), so gross vs net differs only by what's charged.
+
+Why it exists: the live strategy's worst drawdown (−88.8%, Sept 1976 → Sept
+1982) happened while the S&P's price rose 11.7%. A sideways market whipsawed
+it at 5× (the vol gate never fired — vol stayed under 22%), and Fed Funds at
+11–16% made 5× cost ~70%/yr. Of the at-the-time indicators tried, only rate
+rules helped; trend/whipsaw filters didn't, and an SMA-slope rule hurt. On
+the live strategy, all history:
+
+| Cost cap | Net CAGR | Max drawdown |
+|---|---|---|
+| off | 18.7% | −88.8% |
+| 15%/yr | 19.5% | −85.2% |
+| 20%/yr | 20.0% | −85.2% |
+| 25%/yr | 19.8% | −85.2% |
+| 10%/yr | 16.4% | −73.5% |
+
+Caveats, not to relitigate away: Fed Funds above ~10% happened in only two
+episodes in this data (1973–74, 1979–85), so this can't be validated
+statistically, and the results are not monotonic in the cap (don't tune it).
+Its case is arithmetic, not prediction: the cost of leverage is known in
+advance. 5× products didn't exist in 1980 — this applies today's product
+spreads to that era's rates. `strategy_lib.py` does not implement the cap
+(the JS↔Python check covers configs without it).
+
 ## Charts are Plotly (switched 2026-10-15)
 All four charts — Developed equity, Explorer price, performance + underwater,
 and fee history — moved from hand-rolled SVG to Plotly for hover readouts,

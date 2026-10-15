@@ -48,7 +48,13 @@ window.Chart = (function () {
 
     // Align everything to the equity curve's dates, then window.
     var priceByDate = {}, stateByDate = {}, grossByDate = {}, holdByDate = {};
-    prices.forEach(function (p, i) { priceByDate[p.date] = p.close; stateByDate[p.date] = walkResult.state[i]; });
+    // `walkResult.held` (optional) is the leverage actually held each day after
+    // a cost cap; without one it's the walk's own state (or outLeverage while out).
+    var heldByDate = {};
+    prices.forEach(function (p, i) {
+      priceByDate[p.date] = p.close; stateByDate[p.date] = walkResult.state[i];
+      if (walkResult.held) heldByDate[p.date] = walkResult.held[i];
+    });
     if (curves.net) curves.gross.forEach(function (e) { grossByDate[e.date] = e.equity; });
     if (curves.hold) curves.hold.forEach(function (e) { holdByDate[e.date] = e.equity; });
 
@@ -71,32 +77,36 @@ window.Chart = (function () {
         gross: curves.net && g0 > 0 ? grossByDate[e.date] / g0 : null,
         hold: (curves.hold ? holdByDate[e.date] : priceByDate[e.date]) / h0,
         dd: peak > 0 ? strat / peak - 1 : -1,
-        state: stateByDate[e.date] || 0
+        state: stateByDate[e.date] || 0,
+        held: walkResult.held ? heldByDate[e.date] || 0 : null
       };
     });
 
-    var maxState = series.reduce(function (m, s) { return Math.max(m, s.state); }, strategy.outLeverage || 0) || 1;
     var isVolTgt = (strategy.sizing || {}).mode === "volTarget";
     // A strategy added from the Explorer can hold leverage below the SMA.
     var outLev = strategy.outLeverage || 0;
+    series.forEach(function (s) { if (s.held == null) s.held = s.state > 0 ? s.state : outLev; });
+    var maxState = series.reduce(function (m, s) { return Math.max(m, s.state, s.held); }, outLev) || 1;
     var gated = strategy.leverage && strategy.leverage.gated;
     var base = strategy.leverage ? strategy.leverage.base : 1;
 
     // Block height carries the level as well as the colour (green vs amber is
     // a hard pair for red-green colour blindness): a vol-target position's
     // height is its size; a ratcheted-down position is half height.
+    // "Reduced" = in, but holding less than the base leverage: a vol-gate
+    // ratchet, or a cost cap trimming it.
     function fullLevel(i) {
-      var s = series[i].state;
-      if (!(s > 0)) return 0;
-      if (isVolTgt) return s / maxState;
-      return gated && s < base ? 0 : 1;
+      var s = series[i];
+      if (!(s.state > 0)) return 0;
+      if (isVolTgt) return s.held / maxState;
+      return s.held < base ? 0 : 1;
     }
-    function reducedLevel(i) { var s = series[i].state; return !isVolTgt && gated && s > 0 && s < base ? 0.5 : 0; }
+    function reducedLevel(i) { var s = series[i]; return !isVolTgt && s.state > 0 && s.held < base ? 0.5 : 0; }
     function dateAt(i) { return series[i].date; }
     var last = series.length - 1;
     var fullSteps = Plot.steps(dateAt, fullLevel, 0, last);
     var downSteps = Plot.steps(dateAt, reducedLevel, 0, last);
-    var stripSteps = Plot.steps(dateAt, function (i) { return series[i].state > 0 ? series[i].state : outLev; }, 0, last);
+    var stripSteps = Plot.steps(dateAt, function (i) { return series[i].held; }, 0, last);
 
     var worstI = 0;
     series.forEach(function (s, i) { if (s.dd < series[worstI].dd) worstI = i; });
@@ -110,9 +120,10 @@ window.Chart = (function () {
       [worstI, ruinI, ruinI - 1]);
     var kd = keep.map(dateAt);
     function heldText(i) {
-      var s = series[i].state;
-      if (!(s > 0)) return outLev ? "below the SMA, holding " + outLev + "×" : "out, in cash";
-      return isVolTgt ? "holding " + Math.round(s * 100) + "%" : "in at " + fmt(s, 0) + "×";
+      var s = series[i];
+      if (!(s.state > 0)) return outLev ? "below the SMA, holding " + s.held + "×" : "out, in cash";
+      if (isVolTgt) return "holding " + Math.round(s.held * 100) + "%";
+      return "in at " + fmt(s.held, 0) + "×" + (s.held < s.state ? " (cost cap)" : "");
     }
 
     var lastPt = series[last];
@@ -197,8 +208,9 @@ window.Chart = (function () {
         ? '<span data-trace="0"><i class="sw-blk-full"></i>Invested &mdash; taller shading is a bigger position</span>'
         : (gated
           ? '<span data-trace="0"><i class="sw-blk-full"></i>In at ' + fmt(strategy.leverage.base, 0) + '× (full height)</span>'
-            + '<span data-trace="1"><i class="sw-blk-reduced"></i>Ratcheted to ' + fmt(gated, 0) + '× (half height)</span>'
-          : '<span data-trace="0"><i class="sw-blk-full"></i>In the market</span>'))
+            + '<span data-trace="1"><i class="sw-blk-reduced"></i>' + (strategy.costCap > 0 ? 'Reduced &mdash; vol ratchet or cost cap' : 'Ratcheted to ' + fmt(gated, 0) + '×') + ' (half height)</span>'
+          : '<span data-trace="0"><i class="sw-blk-full"></i>In the market</span>'
+            + (strategy.costCap > 0 ? '<span data-trace="1"><i class="sw-blk-reduced"></i>Cut by the cost cap (half height)</span>' : '')))
       + '<span class="ch-note">' + (outLev ? 'unshaded = below the SMA, held at ' + outLev + '&times;' : 'unshaded = out, in cash') + ' &middot; rebased to 1× at ' + series[0].date + ' &middot; log scale</span>'
       + '</div>'
       + '<div class="toolsrow">'

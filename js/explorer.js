@@ -54,7 +54,10 @@ window.Explorer = (function () {
     // periodIdx until cleared or another period/asset is picked.
     custom: null,
     sizing: "gated",
-    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true },
+    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 0 },
+    // The cost-cap slider's value, remembered while the switch is off
+    // (params.cap is 0 then — off — so the matrices see it as off).
+    capValue: SC.CAP_SLIDER.def,
     matrices: [{ x: "buffer", y: "sma" }, { x: "low", y: "high" }],
     perfMode: "total", annMode: "calendar"
   };
@@ -132,9 +135,10 @@ window.Explorer = (function () {
         list = fine;
       }
     } else if (key === "latch") list = [true, false];
+    else if (key === "cap") list = SC.CAP_OPTIONS;
     else list = [];
     var cur = state.params[key];
-    if ((key === "sma" || key === "buffer" || key === "volwin" || key === "gate") && list.length && list.indexOf(cur) < 0) {
+    if ((key === "sma" || key === "buffer" || key === "volwin" || key === "gate" || key === "cap") && list.length && list.indexOf(cur) < 0) {
       list = list.concat([cur]).sort(function (a, b) { return a - b; });
     }
     return list;
@@ -225,10 +229,10 @@ window.Explorer = (function () {
   function paramBarHTML(costs, gs) {
     var asset = assetConfig(state.asset), p = state.params, gated = isGated(asset);
 
-    function field(key, inner) {
+    function field(key, inner, labelExtra) {
       var dim = PARAMS[key].gated && !gated;
       return '<div class="pb-field' + (dim ? " dim" : "") + '"' + (dim ? ' title="Only used when sizing is vol-gated"' : "") + '>'
-        + '<label>' + PARAMS[key].label + '</label>' + inner + '</div>';
+        + '<label>' + PARAMS[key].label + (labelExtra || "") + '</label>' + inner + '</div>';
     }
     function num(key) {
       var n = PARAMS[key].num, dis = PARAMS[key].gated && !gated;
@@ -240,6 +244,15 @@ window.Explorer = (function () {
         var off = disabledFn && disabledFn(v);
         return '<option value="' + v + '"' + (v === p[key] ? " selected" : "") + (off ? " disabled" : "") + '>' + PARAMS[key].fmt(v) + (off ? (key === "out" ? " (not below the lowest held above)" : " (no product)") : "") + '</option>';
       }).join("") + '</select>';
+    }
+
+    // Switch + slider: the switch turns the cap on at the slider's value.
+    function capControl() {
+      var on = p.cap > 0, v = on ? p.cap : state.capValue, sl = SC.CAP_SLIDER;
+      return '<div class="cap-ctl"><label class="cap-switch" title="Never hold more leverage than costs this much a year, all-in, at that month&#8217;s interest rate">'
+        + '<input type="checkbox" data-cap-on="1"' + (on ? " checked" : "") + '><span>' + (on ? "On" : "Off") + '</span></label>'
+        + '<input type="range" data-cap-slider="1" min="' + sl.min + '" max="' + sl.max + '" step="' + sl.step + '" value="' + v + '"' + (on ? "" : " disabled") + ' aria-label="Maximum all-in cost, % a year">'
+        + '</div>';
     }
 
     var sizing = '<div class="pb-field"><label>Sizing</label><div class="winbtns">'
@@ -271,6 +284,7 @@ window.Explorer = (function () {
       + field("out", select("out", outs, function (l) { return l >= ceil; }))
       + field("volwin", num("volwin")) + field("gate", num("gate"))
       + field("latch", select("latch", [true, false]))
+      + field("cap", capControl(), ' <span class="cap-val">&le;' + (p.cap > 0 ? p.cap : state.capValue) + '%/yr</span>')
       + '</div>' + note
       + (gs.enabled ? '<div class="toolsrow">' + gateSummary(gs) + '</div>' : "");
   }
@@ -294,7 +308,8 @@ window.Explorer = (function () {
       rateNow: rate.loaded ? rate.latestValue : 0, rateNowMonth: rate.latest,
       rateEarliest: rate.loaded ? rate.earliest : null,
       divFn: divFn, from: from, to: to,
-      productName: prod.name, quotedCharge: prod.mgmtFeePct + prod.dailySwapRatePct * 360
+      productName: prod.name, quotedCharge: prod.mgmtFeePct + prod.dailySwapRatePct * 360,
+      cap: state.params.cap
     });
   }
 
@@ -423,8 +438,8 @@ window.Explorer = (function () {
   function isLiveSet(asset, p) {
     if (!asset.live) return false;
     var gated = isGated();
-    var keys = gated && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out"];
-    if (gated !== (asset.live.sizing === "gated") && keys.length > 3) return false;
+    var keys = gated && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out", "cap"];
+    if (gated !== (asset.live.sizing === "gated") && keys.length > 4) return false;
     return keys.every(function (k) { return p[k] === asset.live.params[k]; });
   }
 
@@ -587,7 +602,8 @@ window.Explorer = (function () {
 
     html += costsPanelHTML(costs, refRates, prices, period, gs);
 
-    var wk = walkFor(prices, asset.key, state.params.sma, state.params.buffer, gs, { out: state.params.out, high: state.params.high });
+    var wk = walkFor(prices, asset.key, state.params.sma, state.params.buffer, gs,
+      { out: state.params.out, high: state.params.high, capAt: SC.costCapFor(env, state.params.cap), capPct: state.params.cap });
     var sel = { sma: state.params.sma, buffer: state.params.buffer };
     html += window.PriceChart.render(prices, sel, state.params.high, period, wk);
     html += costBreakdownHTML(prices, wk, period, state.params.high, ec);
@@ -684,6 +700,25 @@ window.Explorer = (function () {
       });
     });
 
+    // Cost cap: the switch sets params.cap to the slider's value (or 0 = off);
+    // dragging the slider updates its label live and applies on release.
+    var capOn = container.querySelector("[data-cap-on]"), capSlider = container.querySelector("[data-cap-slider]");
+    if (capOn) capOn.addEventListener("change", function () {
+      state.params.cap = capOn.checked ? state.capValue : 0;
+      rerender();
+    });
+    if (capSlider) {
+      capSlider.addEventListener("input", function () {
+        var lbl = container.querySelector(".cap-val");
+        if (lbl) lbl.textContent = "≤" + capSlider.value + "%/yr";
+      });
+      capSlider.addEventListener("change", function () {
+        state.capValue = Number(capSlider.value);
+        if (state.params.cap > 0) state.params.cap = state.capValue;
+        rerender();
+      });
+    }
+
     // Matrix axis dropdowns. Picking the other axis's parameter swaps the two;
     // picking a vol-gate parameter switches sizing to vol-gated (you clearly want it).
     container.querySelectorAll("[data-mx]").forEach(function (el) {
@@ -718,6 +753,7 @@ window.Explorer = (function () {
         if (!m) return;
         state.params[m.x] = parseVal(m.x, cell.getAttribute("data-xv"));
         state.params[m.y] = parseVal(m.y, cell.getAttribute("data-yv"));
+        if (state.params.cap > 0) state.capValue = state.params.cap;
         rerender();
       }
       cell.addEventListener("click", pick);

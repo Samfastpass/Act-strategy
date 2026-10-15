@@ -67,6 +67,13 @@
       state.data = await loadAllData();
       renderAll();
     },
+    // The cost model for a strategy's asset — what a cost cap decides with.
+    decisionCosts: function (strategy) {
+      var key = window.StrategyStore.costKeyFor(strategy);
+      if (!key || !state.costAssumptions) return null;
+      var SC = window.StrategyConfig;
+      return SC.engineCostsFrom(SC.costConfigFor(state.costAssumptions, key), state.refRates);
+    },
     // After a strategy is added, removed, or moved on/off Home.
     onStrategiesChanged: async function () {
       state.strategies = await window.StrategyStore.load();
