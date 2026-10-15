@@ -514,6 +514,106 @@ window.Explorer = (function () {
       + '</div>';
   }
 
+  // --- cost cap sweep ------------------------------------------------------
+  // The last item in "Design space": the current strategy re-run at each cost
+  // cap from 5% to 60% a year, joined point to point, against dashed lines for
+  // the same strategy with no cap. Clicking a point sets that cap, like
+  // clicking a matrix cell. Every point goes through StrategyConfig.evaluate,
+  // so it is the same number a matrix cell with that cap would show.
+  var CAP_SWEEP = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+  var rerenderMain = null;   // set by wire(); the sweep's click handler needs it
+
+  function capSweepHTML(env) {
+    var off = cellStats(env, Object.assign({}, state.params, { cap: 0 }));
+    var head = '<div class="mx-head"><strong>Cost cap sweep</strong>'
+      + '<span class="toolsrow" style="margin:0;">the current strategy at every cost cap &mdash; click a point to use it</span></div>';
+    if (off.invalid) return '<div class="matrix-card">' + head + '<div class="toolsrow">The current strategy cannot run: ' + off.invalid + '.</div></div>';
+    if (off.insufficient) return '<div class="matrix-card">' + head + '<div class="toolsrow">Not enough history in this period.</div></div>';
+
+    var pts = CAP_SWEEP.map(function (c) {
+      return { cap: c, s: cellStats(env, Object.assign({}, state.params, { cap: c })) };
+    });
+    var usable = function (s) { return s && !s.invalid && !s.insufficient && !s.ruined; };
+    var ruinedCaps = pts.filter(function (p) { return p.s.ruined; }).map(function (p) { return p.cap + "%"; });
+    var cur = state.params.cap > 0 ? state.params.cap : null;
+    var best = pts.filter(function (p) { return usable(p.s); })
+      .reduce(function (b, p) { return !b || p.s.cagr > b.s.cagr ? p : b; }, null);
+    // Where the cap stops binding: from here on every point equals "cap off".
+    var noEffect = null;
+    for (var i = pts.length - 1; i >= 0; i--) {
+      if (usable(pts[i].s) && usable(off) && Math.abs(pts[i].s.cagr - off.cagr) < 1e-9 && Math.abs(pts[i].s.maxDD - off.maxDD) < 1e-9) noEffect = pts[i].cap;
+      else break;
+    }
+
+    function hoverText(p) {
+      var s = p.s;
+      if (s.ruined) return "Cap ≤" + p.cap + "%/yr: WIPED OUT" + (s.ruinDate ? " " + s.ruinDate : "");
+      if (!usable(s)) return "Cap ≤" + p.cap + "%/yr: —";
+      return "Cap ≤" + p.cap + "%/yr<br>CAGR " + (s.cagr >= 0 ? "+" : "") + fmt(s.cagr, 1) + "% · max DD " + fmt(s.maxDD, 1) + "%"
+        + "<br>Calmar " + (s.calmar == null ? "—" : fmt(s.calmar, 2)) + " · " + fmt(s.tradesPerYear, 1) + " round trips/yr";
+    }
+
+    var slot = window.Plot.slot({
+      height: 300, key: "explorer-capsweep", legendScope: ".capsweep",
+      label: "Effect of the cost cap on the current strategy: net CAGR and maximum drawdown at each cap from 5 to 60 percent a year",
+      onClick: function (pt) {
+        var c = Number(pt.x);
+        if (!(c > 0) || !rerenderMain) return;
+        state.params.cap = c; state.capValue = c;
+        rerenderMain();
+      },
+      build: function (t) {
+        var xs = pts.map(function (p) { return p.cap; });
+        var markerSize = pts.map(function (p) { return p.cap === cur ? 12 : 7; });
+        var data = [
+          { x: xs, y: pts.map(function (p) { return usable(p.s) ? p.s.cagr : null; }), type: "scatter", mode: "lines+markers", name: "CAGR (net)",
+            line: { color: t.long, width: 2 }, marker: { color: t.long, size: markerSize, line: { color: t.card, width: 1.5 } },
+            customdata: pts.map(hoverText), hovertemplate: "%{customdata}<extra></extra>", connectgaps: false },
+          { x: xs, y: pts.map(function (p) { return usable(p.s) ? p.s.maxDD : null; }), yaxis: "y2", type: "scatter", mode: "lines+markers", name: "Max drawdown",
+            line: { color: t.warn, width: 1.5, dash: "4px,3px" }, marker: { color: t.warn, size: markerSize, symbol: "square", line: { color: t.card, width: 1.5 } },
+            hoverinfo: "skip", connectgaps: false }
+        ];
+        var shapes = [], notes = [];
+        if (usable(off)) {
+          shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: off.cagr, y1: off.cagr, line: { color: t.long, width: 1, dash: "dot" } });
+          shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y2", y0: off.maxDD, y1: off.maxDD, line: { color: t.warn, width: 1, dash: "dot" } });
+          notes.push({ text: "no cap " + (off.cagr >= 0 ? "+" : "") + fmt(off.cagr, 1) + "%", x: 1, xref: "paper", xanchor: "right", y: off.cagr, yref: "y", yanchor: "bottom", showarrow: false, font: { size: 10, color: t.long } });
+          notes.push({ text: "no cap " + fmt(off.maxDD, 1) + "%", x: 1, xref: "paper", xanchor: "right", y: off.maxDD, yref: "y2", yanchor: "top", showarrow: false, font: { size: 10, color: t.warn } });
+        }
+        if (cur) shapes.push({ type: "line", xref: "x", x0: cur, x1: cur, yref: "paper", y0: 0, y1: 1, line: { color: t.ink, width: 1, dash: "dot" } });
+        var rightAxis = window.Plot.axisStyle(t);
+        delete rightAxis.gridcolor;   // no grid on the right axis — the left one draws it
+        return {
+          data: data,
+          layout: {
+            margin: { l: 56, r: 56, t: 10, b: 40 },
+            hovermode: "closest", dragmode: false,
+            xaxis: { type: "linear", range: [2, 63], tickvals: CAP_SWEEP, ticksuffix: "%", hoverformat: ".0f",
+              title: { text: "Cost cap (max all-in cost, % a year)", font: { size: 11, color: t.inkSoft } } },
+            yaxis: Object.assign(window.Plot.axisStyle(t), { ticksuffix: "%", title: { text: "CAGR (net)", font: { size: 11, color: t.long } } }),
+            yaxis2: Object.assign(rightAxis, { overlaying: "y", side: "right", showgrid: false, ticksuffix: "%",
+              title: { text: "Max drawdown", font: { size: 11, color: t.warn } } }),
+            shapes: shapes, annotations: notes
+          }
+        };
+      }
+    });
+
+    return '<div class="matrix-card capsweep">' + head + slot
+      + '<div class="ch-legend">'
+      + '<span data-trace="0"><i class="sw-strat"></i>CAGR, net of costs (left axis)</span>'
+      + '<span data-trace="1"><i class="sw-neg"></i>Max drawdown (right axis, squares)</span>'
+      + '<span class="ch-note">dotted lines = the same strategy with no cap' + (cur ? ' &middot; vertical line = your cap, ≤' + cur + '%/yr' : '') + '</span>'
+      + '</div>'
+      + '<div class="toolsrow">'
+      + (noEffect ? 'From ≤' + noEffect + '%/yr up, the cap never binds in this period &mdash; every point equals no cap. ' : '')
+      + (best ? 'Highest CAGR here is at ≤' + best.cap + '%/yr (' + (best.s.cagr >= 0 ? "+" : "") + fmt(best.s.cagr, 1) + '%)' + (usable(off) ? ' vs ' + (off.cagr >= 0 ? "+" : "") + fmt(off.cagr, 1) + '% with no cap' : '') + ' &mdash; '
+             + 'but a jagged line means the differences are noise from a handful of high-rate years; pick a cap for a reason (what leverage you would refuse to pay for), not the peak. ' : '')
+      + (ruinedCaps.length ? 'Wiped out at ' + ruinedCaps.join(", ") + ' (left blank). ' : '')
+      + 'Same period, costs and parameters as everything above.</div>'
+      + '</div>';
+  }
+
   function summaryHTML(s, gs) {
     function tile(k, v, sub) { return '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + '</div>' + (sub ? '<div class="k" style="margin:3px 0 0;">' + sub + '</div>' : "") + '</div>'; }
     if (s.invalid) return '<div class="toolsrow">This combination cannot run: ' + s.invalid + '.</div>';
@@ -596,6 +696,7 @@ window.Explorer = (function () {
       + 'Backtested on ' + asset.backtestAsset + '. Each period is compounded fresh from its own start, so RUINED means wiped out <em>inside</em> the selected window; the in/out signal still carries in from before it.</div>'
       + '<div class="matrix-stack">'
       + state.matrices.map(function (m, i) { return matrixHTML(i, m, env); }).join("")
+      + capSweepHTML(env)
       + '</div>'
       + (state.matrices.length < MAX_MATRICES ? '<button class="winbtn" data-addm="1">+ Add matrix</button>' : "")
       + '</div>';
@@ -619,6 +720,7 @@ window.Explorer = (function () {
 
   function wire(container, data, costAssumptions, refRates) {
     function rerender() { renderMain(container, data, costAssumptions, refRates); }
+    rerenderMain = rerender;
     function bind(sel, fn) {
       container.querySelectorAll(sel).forEach(function (el) {
         el.addEventListener("click", function () { if (el.disabled) return; fn(el); rerender(); });

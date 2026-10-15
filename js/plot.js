@@ -142,6 +142,8 @@ window.Plot = (function () {
   //   label: aria label for the slot
   //   legendScope: selector of the ancestor holding its [data-trace] legend
   //                entries (default ".panel")
+  //   onClick(point): called with the clicked Plotly point (x, y, customdata)
+  //   (a chart whose x axis isn't dates sets layout.xaxis.type itself)
   // }
   function slot(spec) {
     var id = "plot-" + (nextId++);
@@ -202,6 +204,8 @@ window.Plot = (function () {
     div.innerHTML = "";
     return window.Plotly.newPlot(div, f.data, f.layout, CONFIG).then(function () {
       if (spec.group) div.on("plotly_relayout", function (ev) { onZoom(div, ev); });
+      // Read through _plotSpec so a reused plot calls its CURRENT spec's handler.
+      div.on("plotly_click", function (ev) { var s = div._plotSpec; if (s && s.onClick && ev && ev.points && ev.points.length) s.onClick(ev.points[0]); });
       adopt(div, spec);
     });
   }
