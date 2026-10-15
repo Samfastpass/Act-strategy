@@ -48,12 +48,22 @@ window.Developed = (function () {
     var equity = Engine.backtestEquityCurve(backtestPrices, strategy);
     var ec = netCosts(strategy, costAssumptions, refRates);
     var netEquity = ec ? Engine.backtestEquityCurve(backtestPrices, strategy, ec) : null;
+    // Buy & hold for the chart: 1x, cost-free, but with dividends reinvested
+    // when the series is price-only (as on the Explorer) — the strategy
+    // receives them, so a benchmark without them would flatter it.
+    var hold = null;
+    if (ec && ec.dividendYieldForDate && equity.length) {
+      var lo = backtestPrices.findIndex(function (p) { return p.date === equity[0].date; });
+      var ones = new Array(backtestPrices.length).fill(1);
+      hold = Engine.compoundEquity(backtestPrices, ones, lo, backtestPrices.length - 1,
+        { products: [{ leverage: 1 }], dividendYieldForDate: ec.dividendYieldForDate });
+    }
     // Odds come from the backtest series (more history) using that series'
     // own walk, so episodes and extensions line up with the equity curve.
     var backtestWalk = Engine.walk(backtestPrices, strategy);
     var backtestStatus = Engine.computeStatus(backtestPrices, strategy);
     return {
-      strategy: strategy, status: status, equity: equity,
+      strategy: strategy, status: status, equity: equity, netEquity: netEquity, hold: hold,
       backtestPrices: backtestPrices, backtestWalk: backtestWalk,
       odds: window.Odds.compute(backtestPrices, strategy, backtestWalk, backtestStatus),
       cagrs: cagrsOf(equity),
@@ -83,7 +93,8 @@ window.Developed = (function () {
     return '<div class="panel detail">'
       + '<div class="detail-head"><h2>' + a.strategy.name + ' &mdash; strategy vs. buy &amp; hold</h2>'
       + '<div class="winbtns">' + buttons + '</div></div>'
-      + window.Chart.render(a.strategy, a.backtestPrices, a.equity, a.backtestWalk, chartYears, chartRange)
+      + window.Chart.render(a.strategy, a.backtestPrices, { net: a.netEquity, gross: a.equity, hold: a.hold }, a.backtestWalk, chartYears, chartRange,
+          "fees, financing and " + window.StrategyConfig.session.slippageTier + " slippage")
       + '<div class="toolsrow">Backtested on ' + a.strategy.backtestAsset + ' &middot; '
       + a.backtestPrices.length + ' days on record'
       + (a.strategy.execution ? ' &middot; ' + a.strategy.execution : '')

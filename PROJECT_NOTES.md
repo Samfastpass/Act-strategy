@@ -622,6 +622,16 @@ Decisions worth keeping:
   labels there are bare digits ("2", "5") with no magnitude. No tickformat.
 - **Touch**: no drag-to-zoom (it traps page scrolling) and no toolbar (it
   never hides without hover, and covers the range buttons).
+- **The Developed chart is net of costs** (since 2026-10-15; it plotted the
+  gross curve before, while its card's second CAGR row was net). Net is the
+  main line, gross a dashed line, and buy & hold reinvests dividends like
+  the Explorer's — so on a price-only series like SPX_MERGED it is far above
+  the old price-only line (11,845× vs 355× since 1928). It has the same
+  underwater panel as the Explorer, measured from the window's start, and
+  its all-time figures match the Explorer's exactly for the same strategy.
+- **Zoom → period.** Zooming offers the range as the Explorer's period (a
+  custom `{from, to}` that the whole tab is recomputed on) or as the
+  Developed chart's window (rebased to 1× on its first day).
 - **Leverage still encoded twice**: reduced leverage is a half-height amber
   block on both the price and Developed charts (the Developed chart's used to
   be full height), plus the exposure strip and a hover readout of what was
