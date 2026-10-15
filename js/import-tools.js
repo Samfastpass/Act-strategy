@@ -154,6 +154,10 @@ window.ImportTools = (function () {
   // holds more than 5000 rows Twelve Data returns the NEWEST 5000 (whatever
   // `order` says — checked 2026-09-28), so a full page means "older rows
   // remain": page backwards, ending the day before the oldest row received.
+  // Rows are trimmed to the range asked for: a save once failed with "ON
+  // CONFLICT DO UPDATE command cannot affect row a second time" because a Gold
+  // fetch held the same date twice, and rows outside the requested range are
+  // the way two separately fetched ranges can overlap.
   async function fetchTwelveDataRange(symbolCfg, startDate, endDate, apiKey, onWait) {
     var rows = [];
     var to = endDate;
@@ -161,9 +165,35 @@ window.ImportTools = (function () {
       var page = await fetchTwelveData(symbolCfg, startDate, to, apiKey, onWait);
       rows = page.concat(rows);
       if (page.length < MAX_POINTS) break;
-      to = addDaysUTC(page[0].date, -1);
+      var next = addDaysUTC(page[0].date, -1);
+      if (next >= to) break;   // the page didn't move backwards — never loop on it
+      to = next;
     }
-    return rows;
+    var d = dedupeByDate(rows.filter(function (r) { return r.date >= startDate && r.date <= endDate; }));
+    d.rows.dupes = d;   // so the preview can report what was merged
+    return d.rows;
+  }
+
+  // One row per date, ascending. Postgres rejects an upsert that writes the
+  // same (asset, date) twice in one statement, so every import goes through
+  // this. A repeated date keeps its last occurrence; `conflicts` counts repeats
+  // whose closes disagreed, so the preview can say so rather than hide it.
+  function dedupeByDate(rows) {
+    var byDate = {}, order = [], dropped = 0, conflicts = 0;
+    rows.forEach(function (r) {
+      if (byDate[r.date]) {
+        dropped++;
+        if (byDate[r.date].close !== r.close) conflicts++;
+      } else order.push(r.date);
+      byDate[r.date] = r;
+    });
+    order.sort();
+    return { rows: order.map(function (d) { return byDate[d]; }), dropped: dropped, conflicts: conflicts };
+  }
+
+  function dupeNote(d) {
+    if (!d || !d.dropped) return "";
+    return " — " + d.dropped + " repeated date(s) merged" + (d.conflicts ? " (" + d.conflicts + " with different closes; the later one kept)" : "");
   }
 
   function parseCsv(text) {
@@ -188,6 +218,7 @@ window.ImportTools = (function () {
   }
 
   async function importRows(ctx, asset, rows) {
+    rows = dedupeByDate(rows).rows;   // covers the CSV drop too
     if (!rows.length) return;
     var payload = rows.map(function (r) { return { asset: asset, date: r.date, close: r.close }; });
     var res = await ctx.sb.from("prices").upsert(payload, { onConflict: "asset,date" });
@@ -308,7 +339,7 @@ window.ImportTools = (function () {
             hideStatus(tdStatus);
             results[asset] = rows;
             lines.push(asset + (isBackfill ? " (full history)" : "") + ": " + rows.length + " new day(s)"
-              + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : ""));
+              + (rows.length ? " (" + rows[0].date + " to " + rows[rows.length - 1].date + ")" : "") + dupeNote(rows.dupes));
           } catch (e) {
             lines.push(asset + ": couldn't fetch — " + e.message);
           }
@@ -442,11 +473,17 @@ window.ImportTools = (function () {
             hideStatus(tdStatus);
             results[r.asset] = (results[r.asset] || []).concat(rows);
             lines.push(r.asset + " " + r.from + " → " + r.to + ": " + rows.length + " day(s)"
-              + (rows.length ? "" : " — Twelve Data has none in this range (likely a market closure)"));
+              + (rows.length ? "" : " — Twelve Data has none in this range (likely a market closure)") + dupeNote(rows.dupes));
           } catch (e) {
             lines.push(r.asset + " " + r.from + " → " + r.to + ": couldn't fetch — " + e.message);
           }
         }
+        // Several ranges for one asset are concatenated; merge any overlap.
+        Object.keys(results).forEach(function (asset) {
+          var d = dedupeByDate(results[asset]);
+          results[asset] = d.rows;
+          if (d.dropped) lines.push(asset + ": ranges overlapped" + dupeNote(d));
+        });
         tdCheck.style.display = "none";
         showPreview(results, lines);
       } finally {
