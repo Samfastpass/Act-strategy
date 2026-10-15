@@ -413,7 +413,7 @@ window.StrategyConfig = (function () {
     assetConfig: assetConfig, isGated: isGated, minAbove: minAbove, resolve: resolve,
     normalize: normalize, describe: describe, gateLabel: gateLabel,
     walkFor: walkFor, periodBounds: periodBounds, windowStats: windowStats,
-    evaluate: evaluate, benchmark: benchmark,
+    evaluate: evaluate, benchmark: benchmark, periodSig: periodSig,
     costConfigFor: costConfigFor, refSeriesFn: refSeriesFn, engineCostsFrom: engineCostsFrom, costVariant: costVariant,
     saved: saved, save: save, remove: remove, rename: rename, reorder: reorder
   };

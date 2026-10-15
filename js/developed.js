@@ -166,6 +166,7 @@ window.Developed = (function () {
     });
 
     window.ImportTools.wireUp(container, ctx);
+    window.Plot.mount(container);
   }
 
   return { render: render };

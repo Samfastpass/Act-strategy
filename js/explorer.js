@@ -528,6 +528,9 @@ window.Explorer = (function () {
 
     var ec = engineCostsFrom(costs, refRates);
     var period = PERIODS[state.periodIdx];
+    // The price, performance and fee charts share a zoom; it survives clicks
+    // and edits, and resets when the asset or period on screen changes.
+    window.Plot.linkKey("explorer", state.asset + "|" + SC.periodSig(period));
     var env = {
       prices: prices, asset: asset, costs: costs, ec: ec, period: period,
       stamp: asset.key + "|" + prices.length + "|" + prices[prices.length - 1].date,
@@ -565,6 +568,7 @@ window.Explorer = (function () {
 
     container.innerHTML = html;
     wire(container, data, costAssumptions, refRates);
+    window.Plot.mount(container);
   }
 
   function wire(container, data, costAssumptions, refRates) {

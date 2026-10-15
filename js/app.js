@@ -110,6 +110,8 @@
     if (name === "developed" && state.data) {
       window.Developed.render(panels.developed, state.data, state.strategies, ctx, state.costAssumptions, state.refRates);
     }
+    // Charts on a hidden tab are only drawn once it is shown (js/plot.js).
+    window.Plot.mount(panels[name]);
     tabnav.querySelectorAll(".tab").forEach(function (btn) {
       btn.classList.toggle("active", btn.getAttribute("data-tab") === name);
     });

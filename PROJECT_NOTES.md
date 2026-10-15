@@ -589,6 +589,44 @@ later recover. This fires for no live strategy (their worst-ever daily
 factor is 0.601), so it changed no existing number; it exists because the
 explorer's high-leverage sweeps hit it constantly.
 
+## Charts are Plotly (switched 2026-10-15)
+All four charts — Developed equity, Explorer price, performance + underwater,
+and fee history — moved from hand-rolled SVG to Plotly for hover readouts,
+drag-to-zoom, linked zoom across the Explorer's three charts, click-to-hide
+legend entries, 1y/5y/10y/All buttons and PNG export. Only the drawing
+changed: every series is still computed by the same code, and a before/after
+check of every number and label each chart prints (5 Explorer configs incl. a
+1987 wipeout, 4 Developed windows) matched exactly — 188 of 188.
+
+Decisions worth keeping:
+- **Lazy, pinned, checked load.** `plotly.js-basic-dist-min@4.1.2` (~400 KB
+  gzipped) with an SRI hash, loaded on the first visible chart, so the Home
+  tab never downloads it. If it can't load, the slot says so; nothing else
+  breaks.
+- **Only visible slots are drawn** (`Plot.mount` + `switchTab`): every tab is
+  built at load while hidden, and Plotly sizes a hidden div to zero.
+- **Reuse, don't redraw.** The Explorer rebuilds its HTML on every click.
+  Drawing the performance chart from scratch costs ~240 ms, updating it in
+  place ~20 ms, so a plot with the same `key` is moved into the new slot and
+  `Plotly.react`ed. A matrix click went from ~550 ms to ~250 ms end to end.
+- **Decimation keeps extremes.** Lines are cut to ~2,400 points per bucketed
+  min/max of every series, with the worst-drawdown and ruin days forced in;
+  a plain stride could skip the trough and draw a shallower drawdown than
+  the "worst" label states. In/out blocks are never decimated — they're step
+  traces with a point only where the level changes, exact at every edge.
+- **Blocks sit under the lines** on a hidden 0–1 base axis with the price/
+  equity axis overlaying it; that overlay must set `tickmode` explicitly or
+  its ticks sync to the hidden axis and land on values like 0.967×.
+- **Log-axis labels**: Plotly's own ticks up to two decades; beyond that
+  powers of ten only (`tickmode: "linear", dtick: 1`), since its in-between
+  labels there are bare digits ("2", "5") with no magnitude. No tickformat.
+- **Touch**: no drag-to-zoom (it traps page scrolling) and no toolbar (it
+  never hides without hover, and covers the range buttons).
+- **Leverage still encoded twice**: reduced leverage is a half-height amber
+  block on both the price and Developed charts (the Developed chart's used to
+  be full height), plus the exposure strip and a hover readout of what was
+  held that day.
+
 ## Where this is headed
 The gated (5x→3x vol-ratchet) version of the leverage explorer is the next
 addition, to quantify the gate's contribution directly.

@@ -1,25 +1,14 @@
-// Hand-rolled SVG equity chart: strategy vs. buy & hold, with an exposure
+// Developed-tab equity chart: strategy vs. buy & hold, with an exposure
 // strip underneath showing what the strategy was actually holding at the
-// time. No charting library — keeps the zero-build-step setup, and lets
-// the chart inherit the page's CSS variables in both themes.
+// time. Drawn with Plotly via js/plot.js (hover, zoom, PNG export); the
+// series are computed here, the colours come from the page's CSS variables.
 //
 // The y-axis is logarithmic. Over BTC's full history equity spans several
 // orders of magnitude, and on a linear axis the first decade would be an
 // indistinguishable flat line against the axis.
 window.Chart = (function () {
   var fmt = window.App.fmt;
-
-  // PAD_B/STRIP_GAP are sized so the exposure strip's caption clears the
-  // plot's own date labels — at the old spacing they sat 2px apart and
-  // overprinted each other.
-  var W = 720, H = 286, PAD_L = 46, PAD_R = 12, PAD_T = 12, PAD_B = 72;
-  var STRIP_H = 22, STRIP_GAP = 24;
-  var PLOT_W = W - PAD_L - PAD_R;
-  var PLOT_H = H - PAD_T - PAD_B;
-
-  function esc(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
+  var Plot = window.Plot;
 
   // Slice a date-keyed series to the trailing `years` (null = everything).
   function windowStartDate(lastDate, years) {
@@ -28,6 +17,14 @@ window.Chart = (function () {
     d.setFullYear(d.getFullYear() - years);
     return d;
   }
+
+  // Drawn by Plotly (js/plot.js): exposure blocks on a hidden 0–1 base axis
+  // under the log equity axis (y2 overlays y), and the exposure strip as its
+  // own small panel (y3) on the same date axis, so zoom moves both. Trace
+  // order is what the legend's data-trace indexes point at:
+  // 0 full/sized blocks, 1 reduced blocks, 2 buy & hold, 3 strategy, 4 strip.
+  var MAIN_DOMAIN = [0.27, 1], STRIP_DOMAIN = [0, 0.15];
+  var TARGET_POINTS = 2400;
 
   function render(strategy, prices, equityCurve, walkResult, years) {
     if (!equityCurve.length) return '<div class="loading">Not enough history to chart.</div>';
@@ -57,133 +54,96 @@ window.Chart = (function () {
       };
     });
 
-    var lo = Infinity, hi = -Infinity;
-    series.forEach(function (s) {
-      lo = Math.min(lo, s.strat, s.hold);
-      hi = Math.max(hi, s.strat, s.hold);
-    });
-    lo = Math.max(lo, 1e-6);
-    var logLo = Math.log10(lo), logHi = Math.log10(hi);
-    if (logHi - logLo < 0.05) { logHi = logLo + 0.05; } // guard a flat window
-
-    var t0 = new Date(series[0].date).getTime();
-    var t1 = new Date(series[series.length - 1].date).getTime();
-    var spanT = Math.max(1, t1 - t0);
-
-    function x(dateStr) { return PAD_L + ((new Date(dateStr).getTime() - t0) / spanT) * PLOT_W; }
-    function y(v) { return PAD_T + (1 - (Math.log10(Math.max(v, 1e-6)) - logLo) / (logHi - logLo)) * PLOT_H; }
-
-    function path(key) {
-      var d = "";
-      for (var i = 0; i < series.length; i++) {
-        d += (i ? "L" : "M") + x(series[i].date).toFixed(1) + " " + y(series[i][key]).toFixed(1);
-      }
-      return d;
-    }
-
-    // Gridlines evenly spaced in log space. Decade-only ticks would draw a
-    // single line on a 1x–3x window and a dozen on BTC's full history, so
-    // pick ~4 steps across whatever range this window actually spans and
-    // snap each to a readable 1/2/5 value.
-    function niceLog(v) {
-      var p = Math.floor(Math.log10(v));
-      var base = Math.pow(10, p);
-      var m = v / base;
-      var snapped = m < 1.5 ? 1 : (m < 3.5 ? 2 : (m < 7.5 ? 5 : 10));
-      return snapped * base;
-    }
-    var gridlines = "";
-    var seen = {};
-    for (var g = 0; g <= 4; g++) {
-      var gv = niceLog(Math.pow(10, logLo + (logHi - logLo) * (g / 4)));
-      if (seen[gv] || gv <= 0) continue;
-      seen[gv] = true;
-      var gy = y(gv);
-      if (gy < PAD_T - 1 || gy > PAD_T + PLOT_H + 1) continue;
-      var label = gv >= 1 ? fmt(gv, 0) : gv.toPrecision(2);
-      gridlines += '<line x1="' + PAD_L + '" y1="' + gy.toFixed(1) + '" x2="' + (W - PAD_R) + '" y2="' + gy.toFixed(1) + '" class="ch-grid"/>'
-        + '<text x="' + (PAD_L - 6) + '" y="' + (gy + 3.5).toFixed(1) + '" class="ch-axis" text-anchor="end">'
-        + label + '×</text>';
-    }
-
-    // X labels: first, middle, last.
-    var xticks = "";
-    [0, Math.floor(series.length / 2), series.length - 1].forEach(function (i, k) {
-      var s = series[i];
-      var anchor = k === 0 ? "start" : (k === 2 ? "end" : "middle");
-      xticks += '<text x="' + x(s.date).toFixed(1) + '" y="' + (PAD_T + PLOT_H + 16) + '" class="ch-axis" text-anchor="' + anchor + '">' + s.date.slice(0, 7) + '</text>';
-    });
-
-    // Exposure strip: one bar per day, height scaled to the window's max
-    // exposure so it reads for both 0/3/5x leverage and 0–100% sizing.
-    var maxState = series.reduce(function (m, s) { return Math.max(m, s.state); }, 0) || 1;
-
-    // Background blocks behind the curves, coloured by exposure level, with
-    // contiguous runs of equal exposure merged into single rects (the ratchet
-    // and the no-trade band both produce long runs, so this is a handful of
-    // rects rather than one per day).
-    //
-    // Colour alone must not carry the leverage — green vs amber is a hard pair
-    // for red-green colour blindness — so the height strip below stays, and
-    // the legend names each level.
+    var maxState = series.reduce(function (m, s) { return Math.max(m, s.state); }, strategy.outLeverage || 0) || 1;
     var isVolTgt = (strategy.sizing || {}).mode === "volTarget";
+    // A strategy added from the Explorer can hold leverage below the SMA.
+    var outLev = strategy.outLeverage || 0;
     var gated = strategy.leverage && strategy.leverage.gated;
-    var blocks = "", runStart = null, runVal = 0;
-    function flushRun(endIdx) {
-      if (runStart === null || runVal <= 0) return;
-      var bx0 = x(series[runStart].date), bx1 = x(series[endIdx].date);
-      // Continuous sizing gets one hue at proportional opacity; a discrete
-      // ratchet gets distinct classes per level.
-      var cls = isVolTgt ? "blk-full" : (gated && runVal < strategy.leverage.base ? "blk-reduced" : "blk-full");
-      var op = isVolTgt ? (0.10 + 0.20 * (runVal / maxState)).toFixed(3) : "";
-      blocks += '<rect x="' + bx0.toFixed(1) + '" y="' + PAD_T + '" width="' + Math.max(0.5, bx1 - bx0).toFixed(1)
-        + '" height="' + PLOT_H + '" class="ch-blk ' + cls + '"'
-        + (op ? ' style="opacity:' + op + '"' : '') + '/>';
+    var base = strategy.leverage ? strategy.leverage.base : 1;
+
+    // Block height carries the level as well as the colour (green vs amber is
+    // a hard pair for red-green colour blindness): a vol-target position's
+    // height is its size; a ratcheted-down position is half height.
+    function fullLevel(i) {
+      var s = series[i].state;
+      if (!(s > 0)) return 0;
+      if (isVolTgt) return s / maxState;
+      return gated && s < base ? 0 : 1;
     }
-    series.forEach(function (s, i) {
-      if (s.state !== runVal) { flushRun(i - 1 < 0 ? 0 : i - 1); runStart = i; runVal = s.state; }
-      if (i === series.length - 1) flushRun(i);
-    });
+    function reducedLevel(i) { var s = series[i].state; return !isVolTgt && gated && s > 0 && s < base ? 0.5 : 0; }
+    function dateAt(i) { return series[i].date; }
+    var last = series.length - 1;
+    var fullSteps = Plot.steps(dateAt, fullLevel, 0, last);
+    var downSteps = Plot.steps(dateAt, reducedLevel, 0, last);
+    var stripSteps = Plot.steps(dateAt, function (i) { return series[i].state > 0 ? series[i].state : outLev; }, 0, last);
 
-    var stripY = PAD_T + PLOT_H + STRIP_GAP + 14;
-    var barW = Math.max(0.6, PLOT_W / series.length);
-    var bars = "";
+    var keep = Plot.decimate(series.length, TARGET_POINTS,
+      [function (i) { return series[i].strat; }, function (i) { return series[i].hold; }], []);
+    var kd = keep.map(dateAt);
+    function heldText(i) {
+      var s = series[i].state;
+      if (!(s > 0)) return outLev ? "below the SMA, holding " + outLev + "×" : "out, in cash";
+      return isVolTgt ? "holding " + Math.round(s * 100) + "%" : "in at " + fmt(s, 0) + "×";
+    }
+
+    var lastPt = series[last];
+    var eMin = Infinity, eMax = 0;
     series.forEach(function (s) {
-      if (s.state <= 0) return;
-      var h = (s.state / maxState) * STRIP_H;
-      bars += '<rect x="' + x(s.date).toFixed(1) + '" y="' + (stripY + STRIP_H - h).toFixed(1)
-        + '" width="' + barW.toFixed(2) + '" height="' + h.toFixed(1) + '" class="ch-expo"/>';
+      if (s.strat > 0) { eMin = Math.min(eMin, s.strat); eMax = Math.max(eMax, s.strat); }
+      eMin = Math.min(eMin, s.hold); eMax = Math.max(eMax, s.hold);
     });
-
-    var last = series[series.length - 1];
-    var isVolTarget = (strategy.sizing || {}).mode === "volTarget";
-    var expoLabel = isVolTarget
+    var expoLabel = isVolTgt
       ? "Exposure (0–" + Math.round(maxState * 100) + "%)"
       : "Exposure (0–" + fmt(maxState, 0) + "×)";
 
+    var slot = Plot.slot({
+      height: 330, key: "developed-equity", legendScope: ".chart-wrap",
+      label: (strategy.rawName || strategy.name) + " strategy versus buy and hold, log scale, shaded by position size",
+      build: function (t) {
+        var stepLine = { width: 0, shape: "hv" };
+        var data = [
+          { x: fullSteps.x, y: fullSteps.y, type: "scatter", mode: "lines", name: "In", line: stepLine,
+            fill: "tozeroy", fillcolor: t.alpha(t.long, 0.13), hoverinfo: "skip" },
+          { x: downSteps.x, y: downSteps.y, type: "scatter", mode: "lines", name: "Ratcheted down", line: stepLine,
+            fill: "tozeroy", fillcolor: t.alpha(t.flat, 0.2), hoverinfo: "skip" },
+          { x: kd, y: keep.map(function (i) { return series[i].hold; }), yaxis: "y2", type: "scatter", mode: "lines", name: "Buy & hold",
+            line: { color: t.inkFaint, width: 1.2 }, hovertemplate: "Buy & hold %{y:,.2f}×<extra></extra>" },
+          { x: kd, y: keep.map(function (i) { return series[i].strat > 0 ? series[i].strat : null; }), yaxis: "y2", type: "scatter", mode: "lines", name: "Strategy",
+            line: { color: t.long, width: 1.6 }, customdata: keep.map(heldText),
+            hovertemplate: "Strategy %{y:,.2f}× · %{customdata}<extra></extra>" },
+          { x: stripSteps.x, y: stripSteps.y, yaxis: "y3", type: "scatter", mode: "lines", name: "Exposure",
+            line: { color: t.long, width: 1, shape: "hv" }, fill: "tozeroy", fillcolor: t.alpha(t.long, 0.6), hoverinfo: "skip" }
+        ];
+        var stripAxis = Plot.axisStyle(t);
+        delete stripAxis.gridcolor;   // the strip has no grid
+        return {
+          data: data,
+          layout: {
+            margin: { l: 56, r: 14, t: 8, b: 28 },
+            xaxis: { anchor: "y3" },
+            yaxis: { domain: MAIN_DOMAIN, range: [0, 1], visible: false, fixedrange: true },
+            yaxis2: Object.assign(Plot.axisStyle(t), { overlaying: "y", side: "left" }, Plot.logAxis(eMin, eMax, "×")),
+            yaxis3: Object.assign(stripAxis, { domain: STRIP_DOMAIN, range: [0, maxState], showgrid: false, fixedrange: true,
+              tickvals: [0, maxState], ticktext: ["0", isVolTgt ? Math.round(maxState * 100) + "%" : fmt(maxState, 0) + "×"] }),
+            annotations: [{ text: expoLabel, x: 0, xref: "paper", y: STRIP_DOMAIN[1], yref: "paper", xanchor: "left", yanchor: "bottom", showarrow: false, font: { size: 10, color: t.inkFaint } }]
+          }
+        };
+      }
+    });
+
     return ''
       + '<div class="chart-wrap">'
-      + '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" preserveAspectRatio="xMidYMid meet" role="img" '
-      + 'aria-label="' + esc(strategy.rawName || strategy.name) + ' strategy versus buy and hold, log scale, shaded by position size">'
-      + blocks
-      + gridlines
-      + '<path d="' + path("hold") + '" class="ch-hold"/>'
-      + '<path d="' + path("strat") + '" class="ch-strat"/>'
-      + xticks
-      + '<text x="' + PAD_L + '" y="' + (stripY - 4) + '" class="ch-axis">' + expoLabel + '</text>'
-      + '<rect x="' + PAD_L + '" y="' + stripY + '" width="' + PLOT_W + '" height="' + STRIP_H + '" class="ch-strip-bg"/>'
-      + bars
-      + '</svg>'
+      + slot
       + '<div class="ch-legend">'
-      + '<span><i class="sw-strat"></i>Strategy <b>' + fmt(last.strat, 2) + '×</b></span>'
-      + '<span><i class="sw-hold"></i>Buy &amp; hold <b>' + fmt(last.hold, 2) + '×</b></span>'
+      + '<span data-trace="3"><i class="sw-strat"></i>Strategy <b>' + fmt(lastPt.strat, 2) + '×</b></span>'
+      + '<span data-trace="2"><i class="sw-hold"></i>Buy &amp; hold <b>' + fmt(lastPt.hold, 2) + '×</b></span>'
       + (isVolTgt
-        ? '<span><i class="sw-blk-full"></i>Invested &mdash; deeper shading is a bigger position</span>'
+        ? '<span data-trace="0"><i class="sw-blk-full"></i>Invested &mdash; taller shading is a bigger position</span>'
         : (gated
-          ? '<span><i class="sw-blk-full"></i>In at ' + fmt(strategy.leverage.base, 0) + '×</span>'
-            + '<span><i class="sw-blk-reduced"></i>Ratcheted to ' + fmt(gated, 0) + '×</span>'
-          : '<span><i class="sw-blk-full"></i>In the market</span>'))
-      + '<span class="ch-note">unshaded = out, in cash &middot; rebased to 1× at ' + series[0].date + ' &middot; log scale</span>'
+          ? '<span data-trace="0"><i class="sw-blk-full"></i>In at ' + fmt(strategy.leverage.base, 0) + '× (full height)</span>'
+            + '<span data-trace="1"><i class="sw-blk-reduced"></i>Ratcheted to ' + fmt(gated, 0) + '× (half height)</span>'
+          : '<span data-trace="0"><i class="sw-blk-full"></i>In the market</span>'))
+      + '<span class="ch-note">' + (outLev ? 'unshaded = below the SMA, held at ' + outLev + '&times;' : 'unshaded = out, in cash') + ' &middot; rebased to 1× at ' + series[0].date + ' &middot; log scale</span>'
       + '</div>'
       + '</div>';
   }
