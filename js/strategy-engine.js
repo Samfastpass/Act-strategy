@@ -115,7 +115,10 @@ window.StrategyEngine = (function () {
 
   // Current status: price/SMA, extension %, in/out + leverage state, and
   // the % move needed to flip ("cushion").
-  function computeStatus(prices, params) {
+  // `decisionCosts` (optional) lets a cost-capped strategy (params.costCap)
+  // report what it should hold today after the cap: `state` is then capped,
+  // `uncapped` is what the trend/vol rules alone say, and `capLimit` the cap.
+  function computeStatus(prices, params, decisionCosts) {
     var w = walk(prices, params);
     var n = w.closes.length;
     var buffer = params.buffer || 0;
@@ -128,7 +131,7 @@ window.StrategyEngine = (function () {
     var upper = curSma * (1 + buffer), lower = curSma * (1 - buffer);
     var inPos = state > 0;
     var cushion = inPos ? (1 - lower / cur) * 100 : (upper / cur - 1) * 100;
-    return {
+    var res = {
       sma: curSma, cur: cur, ext: ext,
       vol: curVol !== null ? curVol * 100 : null,
       state: state, inPos: inPos, cushion: cushion,
@@ -138,8 +141,15 @@ window.StrategyEngine = (function () {
       // tradeDue means the latest close moved the held size off yesterday's.
       target: target,
       prevState: prevState,
-      tradeDue: sizing.mode === "volTarget" && state !== prevState
+      tradeDue: sizing.mode === "volTarget" && state !== prevState,
+      uncapped: state, capLimit: null
     };
+    if (params.costCap > 0 && decisionCosts && n >= 1) {
+      var limit = costCapLimits(prices.slice(n - 1), params.costCap, decisionCosts)[0];
+      res.capLimit = limit;
+      if (state > limit) res.state = limit;
+    }
+    return res;
   }
 
   // The exposure a walk implies on day i. A gated walk (the explorer's
@@ -148,9 +158,43 @@ window.StrategyEngine = (function () {
   // the exposure is wk.out — cash (0) unless the caller asks to hold some
   // leverage below the SMA. The walk itself never changes: `out` only decides
   // what is held while it says "out".
+  //
+  // wk.capAt (optional, from costCapLimits) is a cost cap: the most leverage
+  // allowed on day i, given what borrowing costs that day. It trims whatever
+  // the walk says to hold — in or out — and never changes the walk.
   function exposureAt(wk, i, leverage) {
-    if (!(wk.state[i] > 0)) return wk.out || 0;
-    return wk.gated ? wk.state[i] : leverage;
+    var e = !(wk.state[i] > 0) ? (wk.out || 0) : (wk.gated ? wk.state[i] : leverage);
+    if (wk.capAt && e > wk.capAt[i]) e = wk.capAt[i];
+    return e;
+  }
+
+  // Cost cap: for each row, the highest leverage in `levels` whose all-in
+  // annual cost (fees + financing at that month's reference rate, via
+  // CostModel.annualDrag on the product that would be held) is at most capPct.
+  // Never below 1x — holding the index unleveraged is the floor. A rule known
+  // in advance (the rate is published), not a forecast: at 16% rates 5x costs
+  // ~70% a year, more than any plausible equity return.
+  // `costs` is compoundEquity's cost object (products + rateForDate).
+  function costCapLimits(prices, capPct, costs, levels) {
+    levels = levels || [1, 2, 3, 5];
+    var products = (costs && costs.products) || [];
+    var maxLev = products.length ? products[products.length - 1].leverage : 1;
+    var rateFor = (costs && costs.rateForDate) || function () { return 0; };
+    var out = new Array(prices.length), lastMonth = null, lastVal = 1;
+    for (var i = 0; i < prices.length; i++) {
+      var month = prices[i].date.slice(0, 7);
+      if (month !== lastMonth) {
+        var rate = rateFor(prices[i].date), best = 1;
+        levels.forEach(function (L) {
+          if (L <= best || L > maxLev + 1e-9) return;
+          var prod = window.CostModel.pickProduct(products, L);
+          if (prod && window.CostModel.annualDrag(L, rate, prod).totalPct <= capPct) best = L;
+        });
+        lastMonth = month; lastVal = best;
+      }
+      out[i] = lastVal;
+    }
+    return out;
   }
 
   function daysBetween(a, b) { return (new Date(b) - new Date(a)) / (1000 * 60 * 60 * 24); }
@@ -278,13 +322,23 @@ window.StrategyEngine = (function () {
   // `costs` is optional (compoundEquity's format): omitted, it is gross — the
   // Developed tab shows both. params.outLeverage is what is held while the walk
   // is OUT (a strategy added from the Explorer's below-SMA tier; 0 = cash).
-  function backtestEquityCurve(prices, params, costs) {
+  //
+  // params.costCap (%/yr, 0/absent = off) applies a cost cap. The cap DECIDES
+  // positions, so it needs rates and products even for a gross curve:
+  // `decisionCosts` supplies them (defaulting to `costs`), keeping the gross
+  // and net curves on identical positions.
+  function backtestEquityCurve(prices, params, costs, decisionCosts) {
     var w = walk(prices, params);
     var n = w.closes.length;
     var firstIdx = w.startIdx;
     if (firstIdx >= n) return [];
     var out = params.outLeverage || 0;
     var exposure = out ? w.state.map(function (s) { return s > 0 ? s : out; }) : w.state;
+    var dc = decisionCosts || costs;
+    if (params.costCap > 0 && dc) {
+      var cap = costCapLimits(prices, params.costCap, dc);
+      exposure = exposure.map(function (e, i) { return Math.min(e, cap[i]); });
+    }
     return compoundEquity(prices, exposure, firstIdx, n - 1, costs || null);
   }
 
@@ -313,6 +367,7 @@ window.StrategyEngine = (function () {
 
   return {
     walk: walk, computeStatus: computeStatus, backtestEquityCurve: backtestEquityCurve,
-    compoundEquity: compoundEquity, cagr: cagr, realizedVol: realizedVol, exposureAt: exposureAt
+    compoundEquity: compoundEquity, cagr: cagr, realizedVol: realizedVol, exposureAt: exposureAt,
+    costCapLimits: costCapLimits
   };
 })();

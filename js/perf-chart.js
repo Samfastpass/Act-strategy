@@ -10,15 +10,7 @@
 // the real cost — decades spent below a prior peak.
 window.PerfChart = (function () {
   var fmt = window.App.fmt;
-
-  var W = 760, PAD_L = 52, PAD_R = 12, PAD_T = 14;
-  // GAP has to clear the main plot's own x-labels before the underwater
-  // panel's caption starts, or the two collide.
-  var MAIN_H = 200, GAP = 44, UW_H = 92, PAD_B = 30;
-  var H = PAD_T + MAIN_H + GAP + UW_H + PAD_B;
-  var PLOT_W = W - PAD_L - PAD_R;
-  var UW_TOP = PAD_T + MAIN_H + GAP;
-  var MAX_POINTS = 1100;
+  var Plot = window.Plot;
 
   // Compound the selected window via the shared StrategyEngine.compoundEquity
   // core — the same one the explorer's matrix (js/explorer.js's windowStats)
@@ -119,6 +111,14 @@ window.PerfChart = (function () {
   }
 
   // --- rendering ----------------------------------------------------------
+  // Drawn by Plotly (js/plot.js): one figure, two stacked y-axes on a shared
+  // date x-axis, so zooming the top plot zooms the underwater panel with it.
+  // Trace order matters — the HTML legend's data-trace indexes point at it.
+  var MAIN_DOMAIN = [0.36, 1], UW_DOMAIN = [0, 0.25];
+  var TARGET_POINTS = 2400;
+
+  function signed(v, dp) { return (v >= 0 ? "+" : "") + fmt(v, dp); }
+
   function render(prices, selected, leverage, period, wk, mode, annMode, costs) {
     var levText = wk.label || (leverage + '×');
     var lo = period.from ? prices.findIndex(function (p) { return p.date >= period.from; }) : 0;
@@ -135,151 +135,87 @@ window.PerfChart = (function () {
     var ruined = built.ruinIdx >= 0;
     var ruinDate = ruined ? pts[built.ruinIdx].date : null;
 
-    var t0 = new Date(pts[0].date).getTime();
-    var t1 = new Date(pts[pts.length - 1].date).getTime();
-    var spanT = Math.max(1, t1 - t0);
-    function x(d) { return PAD_L + ((new Date(d).getTime() - t0) / spanT) * PLOT_W; }
+    var worst = pts[0], worstI = 0;
+    pts.forEach(function (p, i6) { if (p.dd < worst.dd) { worst = p; worstI = i6; } });
 
-    var stride = Math.max(1, Math.ceil(pts.length / MAX_POINTS));
-    var svg = "", legend = "", note = "";
+    // The underwater panel and (in "total" mode) the equity lines share one
+    // decimated index set, so hovering any date shows values from the same day.
+    var keep = Plot.decimate(pts.length, TARGET_POINTS,
+      [function (k) { return pts[k].eq; }, function (k) { return pts[k].hold; }, function (k) { return pts[k].dd; }],
+      [worstI, built.ruinIdx, built.ruinIdx - 1]);
+    var kd = keep.map(function (k) { return pts[k].date; });
 
-    // ---- top plot ----
+    var legend = "", note = "", topTraces = null, topAxis = null, extraShapes = [], extraNotes = [];
+
     if (mode === "total") {
-      // Log axis: zero equity has no position on it, so the curve is clamped
-      // to the axis floor after a wipeout and the event is marked instead.
-      var lo2 = Infinity, hi2 = -Infinity;
-      pts.forEach(function (p) {
-        if (p.eq > 0) { lo2 = Math.min(lo2, p.eq); hi2 = Math.max(hi2, p.eq); }
-        lo2 = Math.min(lo2, p.hold); hi2 = Math.max(hi2, p.hold);
-      });
-      if (!isFinite(lo2) || lo2 <= 0) lo2 = 1e-3;
-      var lLo = Math.log10(lo2), lHi = Math.log10(hi2);
-      if (lHi - lLo < 0.05) lHi = lLo + 0.05;
-      function yLog(v) {
-        var lv = v > 0 ? Math.log10(v) : lLo;      // clamp 0 to the floor
-        return PAD_T + (1 - (Math.min(Math.max(lv, lLo), lHi) - lLo) / (lHi - lLo)) * MAIN_H;
-      }
-      function nice(v) { var p = Math.floor(Math.log10(v)), b = Math.pow(10, p), m = v / b; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * b; }
-      var seen = {};
-      for (var g = 0; g <= 4; g++) {
-        var gv = nice(Math.pow(10, lLo + (lHi - lLo) * (g / 4)));
-        if (seen[gv] || gv <= 0) continue; seen[gv] = 1;
-        var gy = yLog(gv);
-        if (gy < PAD_T - 1 || gy > PAD_T + MAIN_H + 1) continue;
-        svg += '<line x1="' + PAD_L + '" y1="' + gy.toFixed(1) + '" x2="' + (W - PAD_R) + '" y2="' + gy.toFixed(1) + '" class="ch-grid"/>'
-          + '<text x="' + (PAD_L - 6) + '" y="' + (gy + 3.5).toFixed(1) + '" class="ch-axis" text-anchor="end">' + fmt(gv, gv < 1 ? 2 : 0) + '×</text>';
-      }
-      function linePath(key) {
-        var d = "", first = true;
-        for (var i = 0; i < pts.length; i += stride) {
-          d += (first ? "M" : "L") + x(pts[i].date).toFixed(1) + " " + yLog(pts[i][key]).toFixed(1);
-          first = false;
-        }
-        return d;
-      }
-      svg += '<path d="' + linePath("hold") + '" class="ch-hold"/>'
-        + '<path d="' + linePath("eq") + '" class="ch-strat"/>';
-      if (ruined) {
-        var rx = x(ruinDate);
-        svg += '<line x1="' + rx.toFixed(1) + '" y1="' + PAD_T + '" x2="' + rx.toFixed(1) + '" y2="' + (PAD_T + MAIN_H) + '" class="pf-ruinline"/>'
-          + '<text x="' + Math.min(rx + 5, W - PAD_R - 90).toFixed(1) + '" y="' + (PAD_T + 12) + '" class="pf-ruintext">wiped out ' + ruinDate + '</text>';
-      }
-      legend = '<span><i class="sw-strat"></i>Strategy at ' + levText + ' <b>' + (pts[pts.length - 1].eq > 0 ? fmt(pts[pts.length - 1].eq, 2) + '×' : '0 — wiped out') + '</b></span>'
-        + '<span><i class="sw-hold"></i>Buy &amp; hold (1×) <b>' + fmt(pts[pts.length - 1].hold, 2) + '×</b></span>'
+      legend = '<span data-trace="1"><i class="sw-strat"></i>Strategy at ' + levText + ' <b>' + (pts[pts.length - 1].eq > 0 ? fmt(pts[pts.length - 1].eq, 2) + '×' : '0 — wiped out') + '</b></span>'
+        + '<span data-trace="0"><i class="sw-hold"></i>Buy &amp; hold (1×) <b>' + fmt(pts[pts.length - 1].hold, 2) + '×</b></span>'
         + '<span class="ch-note">log scale, rebased to 1× at ' + pts[0].date + '</span>';
       note = 'Total growth of £1, net of the costs configured on this tab. Buy &amp; hold is shown unleveraged and cost-free (dividends reinvested) for reference, so the gap is what the leverage, its costs, and the timing did together.';
+      topTraces = function (t) {
+        return [
+          { x: kd, y: keep.map(function (k) { return pts[k].hold; }), type: "scatter", mode: "lines", name: "Buy & hold",
+            line: { color: t.inkFaint, width: 1.2 }, hovertemplate: "Buy & hold %{y:,.2f}×<extra></extra>" },
+          // Zero has no place on a log axis: after a wipeout the line stops and
+          // the ruin marker says why.
+          { x: kd, y: keep.map(function (k) { return pts[k].eq > 0 ? pts[k].eq : null; }), type: "scatter", mode: "lines", name: "Strategy",
+            line: { color: t.long, width: 1.6 }, connectgaps: false, hovertemplate: "Strategy %{y:,.2f}×<extra></extra>" }
+        ];
+      };
+      var eMin = Infinity, eMax = 0;
+      pts.forEach(function (p) {
+        if (p.eq > 0) { eMin = Math.min(eMin, p.eq); eMax = Math.max(eMax, p.eq); }
+        eMin = Math.min(eMin, p.hold); eMax = Math.max(eMax, p.hold);
+      });
+      topAxis = Plot.logAxis(eMin, eMax, "×");
+      if (ruined) {
+        extraShapes.push({ type: "line", xref: "x", yref: "paper", x0: ruinDate, x1: ruinDate, y0: MAIN_DOMAIN[0], y1: MAIN_DOMAIN[1] });
+        extraNotes.push({ text: "wiped out " + ruinDate, x: ruinDate, y: MAIN_DOMAIN[1] });
+      }
     } else {
-      // Annualised: linear % axis with an emphasised zero line.
       var bars = annMode === "calendar" ? calendarYears(pts) : null;
       var line = annMode === "rolling10" ? rollingAnnualised(pts, 10)
                : annMode === "since" ? sinceStart(pts) : null;
       var vals = bars ? bars.map(function (b) { return b.value; }) : line.map(function (p) { return p.value; });
       if (!vals.length) return '<div class="panel"><div class="loading">Not enough history for this view.</div></div>';
-      var vMin = Math.min(0, Math.min.apply(null, vals));
-      var vMax = Math.max(0, Math.max.apply(null, vals));
-      // Snap the axis to a round step so ticks read 0/100/200% rather than
-      // 18/176/333%, and so the zero line always lands on a tick.
-      var rawStep = (vMax - vMin) / 4 || 1;
-      var mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
-      var norm = rawStep / mag;
-      var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
-      vMin = Math.floor(vMin / step) * step;
-      vMax = Math.ceil(vMax / step) * step;
-      function yLin(v) { return PAD_T + (1 - (v - vMin) / (vMax - vMin)) * MAIN_H; }
-
-      for (var tv = vMin; tv <= vMax + 1e-9; tv += step) {
-        var ty = yLin(tv);
-        svg += '<line x1="' + PAD_L + '" y1="' + ty.toFixed(1) + '" x2="' + (W - PAD_R) + '" y2="' + ty.toFixed(1) + '" class="ch-grid"/>'
-          + '<text x="' + (PAD_L - 6) + '" y="' + (ty + 3.5).toFixed(1) + '" class="ch-axis" text-anchor="end">' + fmt(tv, 0) + '%</text>';
-      }
-      var zy = yLin(0);
-      svg += '<line x1="' + PAD_L + '" y1="' + zy.toFixed(1) + '" x2="' + (W - PAD_R) + '" y2="' + zy.toFixed(1) + '" class="pf-zero"/>';
-
+      topAxis = { ticksuffix: "%", zeroline: true, zerolinewidth: 1.5 };
       if (bars) {
-        var bw = Math.max(1.5, (PLOT_W / bars.length) - 2);
-        bars.forEach(function (b, i2) {
-          var bx = PAD_L + (i2 + 0.5) * (PLOT_W / bars.length) - bw / 2;
-          var by = yLin(Math.max(0, b.value)), bh = Math.abs(yLin(b.value) - zy);
-          svg += '<rect x="' + bx.toFixed(1) + '" y="' + by.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + Math.max(0.5, bh).toFixed(1)
-            + '" class="pf-bar ' + (b.value >= 0 ? "pos" : "neg") + (b.partial ? " partial" : "") + '">'
-            + '<title>' + b.label + (b.partial ? " (partial year)" : "") + ": " + (b.value >= 0 ? "+" : "") + fmt(b.value, 1) + '%</title></rect>';
-        });
-        // Label a readable subset of years.
-        var every = Math.ceil(bars.length / 8);
-        bars.forEach(function (b, i3) {
-          if (i3 % every) return;
-          svg += '<text x="' + (PAD_L + (i3 + 0.5) * (PLOT_W / bars.length)).toFixed(1) + '" y="' + (PAD_T + MAIN_H + 14) + '" class="ch-axis" text-anchor="middle">' + b.label + '</text>';
-        });
         var nPartial = bars.filter(function (b) { return b.partial; }).length;
         legend = '<span><i class="sw-pos"></i>Positive year</span><span><i class="sw-neg"></i>Negative year</span>'
           + (nPartial ? '<span class="ch-note">hatched = partial year at the window edge</span>' : '');
         note = 'Return for each calendar year, chained from the previous year&#8217;s close.'
           + (nPartial ? ' The first and last bars cover part of a year only &mdash; shown as the actual part-year return, not annualised.' : '');
+        topTraces = function (t) {
+          return [{
+            type: "bar", name: "Calendar year",
+            x: bars.map(function (b) { return b.label + "-07-01"; }),
+            y: bars.map(function (b) { return b.value; }),
+            width: bars.map(function () { return 0.8 * 365.25 * 864e5; }),
+            marker: {
+              color: bars.map(function (b) { return b.value >= 0 ? t.long : t.warn; }),
+              opacity: bars.map(function (b) { return b.partial ? 0.55 : 1; }),
+              pattern: { shape: bars.map(function (b) { return b.partial ? "/" : ""; }), fgcolor: t.card, size: 6 }
+            },
+            customdata: bars.map(function (b) { return b.label + (b.partial ? " (partial year)" : "") + ": " + signed(b.value, 1) + "%"; }),
+            hovertemplate: "%{customdata}<extra></extra>"
+          }];
+        };
       } else {
-        var st2 = Math.max(1, Math.ceil(line.length / MAX_POINTS));
-        var d2 = "", f2 = true;
-        for (var i4 = 0; i4 < line.length; i4 += st2) {
-          d2 += (f2 ? "M" : "L") + x(line[i4].date).toFixed(1) + " " + yLin(line[i4].value).toFixed(1);
-          f2 = false;
-        }
-        svg += '<path d="' + d2 + '" class="ch-strat"/>';
+        var lk = Plot.decimate(line.length, TARGET_POINTS, [function (k) { return line[k].value; }], []);
         var last2 = line[line.length - 1];
-        legend = '<span><i class="sw-strat"></i>'
+        legend = '<span data-trace="0"><i class="sw-strat"></i>'
           + (annMode === "rolling10" ? "Trailing 10-year annualised" : "Annualised since " + pts[0].date)
           + ' <b>' + (last2.value >= 0 ? "+" : "") + fmt(last2.value, 1) + '%</b> latest</span>';
         note = annMode === "rolling10"
           ? 'Annualised return over the preceding 10 years, at every date. The spread between its high and low is how much your <em>start date</em> mattered.'
           : 'Annualised return from the window start to each date &mdash; noisy early, converging on the headline CAGR.';
+        topTraces = function (t) {
+          return [{ type: "scatter", mode: "lines", name: annMode === "rolling10" ? "Trailing 10y" : "Since start",
+            x: lk.map(function (k) { return line[k].date; }), y: lk.map(function (k) { return line[k].value; }),
+            line: { color: t.long, width: 1.6 }, hovertemplate: "%{y:+.1f}% a year<extra></extra>" }];
+        };
       }
     }
-
-    // ---- x labels (shared) ----
-    [0, Math.floor(pts.length / 2), pts.length - 1].forEach(function (i5, k) {
-      svg += '<text x="' + x(pts[i5].date).toFixed(1) + '" y="' + (H - 8) + '" class="ch-axis" text-anchor="'
-        + (k === 0 ? "start" : k === 2 ? "end" : "middle") + '">' + pts[i5].date.slice(0, 7) + '</text>';
-    });
-
-    // ---- underwater panel ----
-    var worst = pts[0], worstI = 0;
-    pts.forEach(function (p, i6) { if (p.dd < worst.dd) { worst = p; worstI = i6; } });
-    function yUW(dd) { return UW_TOP + (-dd) * UW_H; }   // 0 at top, -100% at bottom
-
-    svg += '<line x1="' + PAD_L + '" y1="' + UW_TOP + '" x2="' + (W - PAD_R) + '" y2="' + UW_TOP + '" class="pf-zero"/>'
-      + '<text x="' + (PAD_L - 6) + '" y="' + (UW_TOP + 3.5) + '" class="ch-axis" text-anchor="end">0%</text>'
-      + '<text x="' + (PAD_L - 6) + '" y="' + (UW_TOP + UW_H) + '" class="ch-axis" text-anchor="end">−100%</text>'
-      + '<text x="' + PAD_L + '" y="' + (UW_TOP - 6) + '" class="ch-axis">Underwater &mdash; how far below the previous peak</text>';
-
-    var uw = "M" + PAD_L.toFixed(1) + " " + UW_TOP.toFixed(1);
-    for (var i7 = 0; i7 < pts.length; i7 += stride) {
-      uw += "L" + x(pts[i7].date).toFixed(1) + " " + yUW(pts[i7].dd).toFixed(1);
-    }
-    uw += "L" + x(pts[pts.length - 1].date).toFixed(1) + " " + UW_TOP.toFixed(1) + "Z";
-    svg += '<path d="' + uw + '" class="pf-uw"/>';
-
-    var wx = x(worst.date), wy = yUW(worst.dd);
-    svg += '<circle cx="' + wx.toFixed(1) + '" cy="' + wy.toFixed(1) + '" r="3" class="pf-worst"/>'
-      + '<text x="' + Math.min(Math.max(wx + 6, PAD_L), W - PAD_R - 120).toFixed(1) + '" y="' + Math.max(wy - 5, UW_TOP + 10).toFixed(1)
-      + '" class="pf-worsttext">worst ' + fmt(worst.dd * 100, 1) + '% · ' + worst.date + '</text>';
 
     // How long it stayed under water after the worst point.
     var recovered = null;
@@ -287,6 +223,43 @@ window.PerfChart = (function () {
     var underNote = recovered
       ? 'Back to its previous peak on ' + recovered + ' — ' + fmt(yearsBetween(worst.date, recovered), 1) + ' years after the low.'
       : 'Never regained its previous peak within this period.';
+    var worstText = 'worst ' + fmt(worst.dd * 100, 1) + '% · ' + worst.date;
+    var spanYears = yearsBetween(pts[0].date, pts[pts.length - 1].date);
+    var worstRight = worstI > pts.length * 0.7;
+
+    var slot = Plot.slot({
+      height: 400, group: "explorer", key: "explorer-perf",
+      label: "Strategy performance with an underwater drawdown panel, " + pts[0].date + " to " + pts[pts.length - 1].date,
+      build: function (t) {
+        var data = topTraces(t);
+        data.push({
+          x: kd, y: keep.map(function (k) { return pts[k].dd * 100; }), yaxis: "y2", type: "scatter", mode: "lines", name: "Underwater",
+          fill: "tozeroy", fillcolor: t.alpha(t.warn, 0.22), line: { color: t.alpha(t.warn, 0.55), width: 1 },
+          hovertemplate: "Below peak %{y:.1f}%<extra></extra>"
+        });
+        data.push({
+          x: [worst.date], y: [worst.dd * 100], yaxis: "y2", type: "scatter", mode: "markers", name: "Worst",
+          marker: { color: t.warn, size: 7, line: { color: t.card, width: 1.5 } }, hoverinfo: "skip"
+        });
+        var notes = [
+          { text: "Underwater — how far below the previous peak", x: 0, xref: "paper", y: UW_DOMAIN[1], yref: "paper", yanchor: "bottom", xanchor: "left", showarrow: false, font: { size: 10, color: t.inkFaint } },
+          { text: worstText, x: worst.date, xref: "x", y: worst.dd * 100, yref: "y2", xanchor: worstRight ? "right" : "left", yanchor: "top", xshift: worstRight ? -8 : 8, showarrow: false, font: { size: 10, color: t.warn } }
+        ].concat(extraNotes.map(function (n) {
+          return { text: n.text, x: n.x, xref: "x", y: n.y, yref: "paper", xanchor: "left", yanchor: "top", xshift: 5, showarrow: false, font: { size: 10, color: t.warn } };
+        }));
+        var shapes = extraShapes.map(function (s) { return Object.assign({ line: { color: t.warn, width: 1, dash: "dot" } }, s); });
+        return {
+          data: data,
+          layout: {
+            margin: { l: 60, r: 14, t: spanYears > 2 ? 30 : 8, b: 28 },
+            xaxis: Object.assign({ anchor: "y2" }, spanYears > 2 ? { rangeselector: Plot.rangeButtons(t) } : {}),
+            yaxis: Object.assign(Plot.axisStyle(t), { domain: MAIN_DOMAIN }, topAxis, topAxis.zeroline ? { zerolinecolor: t.inkFaint } : {}),
+            yaxis2: Object.assign(Plot.axisStyle(t), { domain: UW_DOMAIN, range: [-102, 2], tickvals: [-100, -50, 0], ticktext: ["−100%", "−50%", "0%"], zeroline: true, zerolinecolor: t.inkFaint, zerolinewidth: 1 }),
+            annotations: notes, shapes: shapes
+          }
+        };
+      }
+    });
 
     return '<div class="panel">'
       + '<div class="detail-head"><h2>Performance (net of costs) &mdash; ' + selected.sma + 'd / ' + selected.buffer + '% at ' + levText + '</h2>'
@@ -299,8 +272,7 @@ window.PerfChart = (function () {
           + '<button class="winbtn' + (annMode === "rolling10" ? " active" : "") + '" data-ann="rolling10">Rolling 10y</button>'
           + '<button class="winbtn' + (annMode === "since" ? " active" : "") + '" data-ann="since">Since start</button></div>'
         : "")
-      + '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" preserveAspectRatio="xMidYMid meet" role="img"'
-      + ' aria-label="Strategy performance with an underwater drawdown panel">' + svg + '</svg></div>'
+      + slot
       + '<div class="ch-legend">' + legend + '</div>'
       + '<div class="toolsrow">' + note + ' <strong>' + underNote + '</strong></div>'
       + '</div>';

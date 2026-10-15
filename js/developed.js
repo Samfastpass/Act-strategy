@@ -13,6 +13,9 @@ window.Developed = (function () {
   // Persist across re-renders (a data refresh re-runs render()).
   var selectedId = null;
   var chartYears = 5;
+  // A window taken from a chart zoom ({ from, to }, to exclusive); overrides
+  // chartYears until cleared, a year button is pressed, or another card opens.
+  var chartRange = null;
   var WINDOWS = [
     { label: "1y", years: 1 }, { label: "3y", years: 3 }, { label: "5y", years: 5 },
     { label: "10y", years: 10 }, { label: "All", years: null }
@@ -41,16 +44,33 @@ window.Developed = (function () {
     if (!livePrices || !livePrices.length || !backtestPrices || !backtestPrices.length) {
       return { strategy: strategy, missing: true };
     }
-    var status = Engine.computeStatus(livePrices, strategy);
-    var equity = Engine.backtestEquityCurve(backtestPrices, strategy);
     var ec = netCosts(strategy, costAssumptions, refRates);
+    // A cost cap decides positions from real rates and products, so even the
+    // gross curve is given `ec` to decide with (it just isn't charged costs).
+    var status = Engine.computeStatus(livePrices, strategy, ec);
+    var equity = Engine.backtestEquityCurve(backtestPrices, strategy, null, ec);
     var netEquity = ec ? Engine.backtestEquityCurve(backtestPrices, strategy, ec) : null;
+    // Buy & hold for the chart: 1x, cost-free, but with dividends reinvested
+    // when the series is price-only (as on the Explorer) — the strategy
+    // receives them, so a benchmark without them would flatter it.
+    var hold = null;
+    if (ec && ec.dividendYieldForDate && equity.length) {
+      var lo = backtestPrices.findIndex(function (p) { return p.date === equity[0].date; });
+      var ones = new Array(backtestPrices.length).fill(1);
+      hold = Engine.compoundEquity(backtestPrices, ones, lo, backtestPrices.length - 1,
+        { products: [{ leverage: 1 }], dividendYieldForDate: ec.dividendYieldForDate });
+    }
     // Odds come from the backtest series (more history) using that series'
     // own walk, so episodes and extensions line up with the equity curve.
     var backtestWalk = Engine.walk(backtestPrices, strategy);
+    if (strategy.costCap > 0 && ec) {
+      // What was actually held each day, for the chart's blocks and strip.
+      var capAt = Engine.costCapLimits(backtestPrices, strategy.costCap, ec), outL = strategy.outLeverage || 0;
+      backtestWalk.held = backtestWalk.state.map(function (st, i) { return Math.min(st > 0 ? st : outL, capAt[i]); });
+    }
     var backtestStatus = Engine.computeStatus(backtestPrices, strategy);
     return {
-      strategy: strategy, status: status, equity: equity,
+      strategy: strategy, status: status, equity: equity, netEquity: netEquity, hold: hold,
       backtestPrices: backtestPrices, backtestWalk: backtestWalk,
       odds: window.Odds.compute(backtestPrices, strategy, backtestWalk, backtestStatus),
       cagrs: cagrsOf(equity),
@@ -70,18 +90,26 @@ window.Developed = (function () {
 
   function detailPanel(a) {
     var buttons = WINDOWS.map(function (w) {
-      return '<button class="winbtn' + (w.years === chartYears ? " active" : "") + '" data-years="'
+      return '<button class="winbtn' + (!chartRange && w.years === chartYears ? " active" : "") + '" data-years="'
         + (w.years == null ? "all" : w.years) + '">' + w.label + '</button>';
-    }).join("");
+    }).join("")
+      + (chartRange ? '<button class="winbtn active" data-range-clear="1" title="Back to the year buttons">' + rangeLabel(chartRange) + ' &times;</button>' : '');
+    // The chart's zoom is offered as its window; it resets when what's on screen changes.
+    window.Plot.linkKey("developed", a.strategy.id + "|" + (chartRange ? rangeLabel(chartRange) : chartYears));
 
     return '<div class="panel detail">'
       + '<div class="detail-head"><h2>' + a.strategy.name + ' &mdash; strategy vs. buy &amp; hold</h2>'
       + '<div class="winbtns">' + buttons + '</div></div>'
-      + window.Chart.render(a.strategy, a.backtestPrices, a.equity, a.backtestWalk, chartYears)
+      + window.Chart.render(a.strategy, a.backtestPrices, { net: a.netEquity, gross: a.equity, hold: a.hold }, a.backtestWalk, chartYears, chartRange,
+          "fees, financing and " + window.StrategyConfig.session.slippageTier + " slippage")
       + '<div class="toolsrow">Backtested on ' + a.strategy.backtestAsset + ' &middot; '
       + a.backtestPrices.length + ' days on record'
       + (a.strategy.execution ? ' &middot; ' + a.strategy.execution : '')
       + '</div>'
+      + '</div>'
+      + '<div class="zoom-bar" id="dev-zoombar" hidden><span>Zoomed to <strong class="zb-range"></strong></span>'
+      + '<button class="winbtn active" data-dev-zoom-apply="1" title="Redraw the chart from this range, rebased to 1× on its first day">Use as the window</button>'
+      + '<span class="muted">double-click the chart to zoom out</span></div>'
       + '</div>'
       + RH.renderOddsTable(a.odds);
   }
@@ -124,6 +152,7 @@ window.Developed = (function () {
       function toggle() {
         var id = card.getAttribute("data-strategy-id");
         selectedId = (selectedId === id) ? null : id;
+        chartRange = null;
         rerender();
       }
       card.addEventListener("click", function (e) { if (!e.target.closest(".card-actions")) toggle(); });
@@ -137,6 +166,7 @@ window.Developed = (function () {
       btn.addEventListener("click", function () {
         var v = btn.getAttribute("data-years");
         chartYears = v === "all" ? null : Number(v);
+        chartRange = null;
         rerender();
       });
     });
@@ -166,7 +196,35 @@ window.Developed = (function () {
     });
 
     window.ImportTools.wireUp(container, ctx);
+    var clearBtn = container.querySelector("[data-range-clear]");
+    if (clearBtn) clearBtn.addEventListener("click", function () { chartRange = null; rerender(); });
+    var zoomBar = container.querySelector("#dev-zoombar");
+    function showZoom(range) {
+      if (!zoomBar) return;
+      zoomBar.hidden = !range;
+      if (range) zoomBar.querySelector(".zb-range").textContent = range[0] + " → " + range[1];
+    }
+    window.Plot.onRange("developed", showZoom);
+    showZoom(window.Plot.groupRange("developed"));
+    var applyBtn = container.querySelector("[data-dev-zoom-apply]");
+    if (applyBtn) applyBtn.addEventListener("click", function () {
+      var r = window.Plot.groupRange("developed");
+      var a = analyses.filter(function (x) { return !x.missing && x.strategy.id === selectedId; })[0];
+      if (!r || !a) return;
+      var last = a.backtestPrices[a.backtestPrices.length - 1].date;
+      chartRange = { from: r[0], to: r[1] >= last ? null : shiftDay(r[1], 1) };
+      rerender();
+    });
+
+    window.Plot.mount(container);
   }
+
+  function shiftDay(d, n) {
+    var t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n);
+    return t.toISOString().slice(0, 10);
+  }
+  // `to` is exclusive; the label shows the last day included.
+  function rangeLabel(r) { return (r.from || "start") + " → " + (r.to ? shiftDay(r.to, -1) : "today"); }
 
   return { render: render };
 })();

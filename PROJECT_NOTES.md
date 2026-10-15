@@ -589,6 +589,88 @@ later recover. This fires for no live strategy (their worst-ever daily
 factor is 0.601), so it changed no existing number; it exists because the
 explorer's high-leverage sweeps hit it constantly.
 
+## Cost cap (added 2026-10-15)
+An optional strategy parameter, `cap` (%/yr, 0 = off, the default): never hold
+more leverage than would cost that much a year all-in (fees + financing at
+that month's Fed Funds/SONIA, via `CostModel.annualDrag` on the product that
+would be held). Each day the most allowed is the highest of 1/2/3/5× within
+the cap, never below 1×; it trims whatever the walk says to hold, in or out,
+and never changes the walk (`StrategyEngine.costCapLimits` + `exposureAt`'s
+`wk.capAt`; `backtestEquityCurve`/`computeStatus` take `params.costCap`).
+Because it DECIDES positions, the gross curve is computed on the same capped
+positions (`decisionCosts`), so gross vs net differs only by what's charged.
+
+Why it exists: the live strategy's worst drawdown (−88.8%, Sept 1976 → Sept
+1982) happened while the S&P's price rose 11.7%. A sideways market whipsawed
+it at 5× (the vol gate never fired — vol stayed under 22%), and Fed Funds at
+11–16% made 5× cost ~70%/yr. Of the at-the-time indicators tried, only rate
+rules helped; trend/whipsaw filters didn't, and an SMA-slope rule hurt. On
+the live strategy, all history:
+
+| Cost cap | Net CAGR | Max drawdown |
+|---|---|---|
+| off | 18.7% | −88.8% |
+| 15%/yr | 19.5% | −85.2% |
+| 20%/yr | 20.0% | −85.2% |
+| 25%/yr | 19.8% | −85.2% |
+| 10%/yr | 16.4% | −73.5% |
+
+Caveats, not to relitigate away: Fed Funds above ~10% happened in only two
+episodes in this data (1973–74, 1979–85), so this can't be validated
+statistically, and the results are not monotonic in the cap (don't tune it).
+Its case is arithmetic, not prediction: the cost of leverage is known in
+advance. 5× products didn't exist in 1980 — this applies today's product
+spreads to that era's rates. `strategy_lib.py` does not implement the cap
+(the JS↔Python check covers configs without it).
+
+## Charts are Plotly (switched 2026-10-15)
+All four charts — Developed equity, Explorer price, performance + underwater,
+and fee history — moved from hand-rolled SVG to Plotly for hover readouts,
+drag-to-zoom, linked zoom across the Explorer's three charts, click-to-hide
+legend entries, 1y/5y/10y/All buttons and PNG export. Only the drawing
+changed: every series is still computed by the same code, and a before/after
+check of every number and label each chart prints (5 Explorer configs incl. a
+1987 wipeout, 4 Developed windows) matched exactly — 188 of 188.
+
+Decisions worth keeping:
+- **Lazy, pinned, checked load.** `plotly.js-basic-dist-min@4.1.2` (~400 KB
+  gzipped) with an SRI hash, loaded on the first visible chart, so the Home
+  tab never downloads it. If it can't load, the slot says so; nothing else
+  breaks.
+- **Only visible slots are drawn** (`Plot.mount` + `switchTab`): every tab is
+  built at load while hidden, and Plotly sizes a hidden div to zero.
+- **Reuse, don't redraw.** The Explorer rebuilds its HTML on every click.
+  Drawing the performance chart from scratch costs ~240 ms, updating it in
+  place ~20 ms, so a plot with the same `key` is moved into the new slot and
+  `Plotly.react`ed. A matrix click went from ~550 ms to ~250 ms end to end.
+- **Decimation keeps extremes.** Lines are cut to ~2,400 points per bucketed
+  min/max of every series, with the worst-drawdown and ruin days forced in;
+  a plain stride could skip the trough and draw a shallower drawdown than
+  the "worst" label states. In/out blocks are never decimated — they're step
+  traces with a point only where the level changes, exact at every edge.
+- **Blocks sit under the lines** on a hidden 0–1 base axis with the price/
+  equity axis overlaying it; that overlay must set `tickmode` explicitly or
+  its ticks sync to the hidden axis and land on values like 0.967×.
+- **Log-axis labels**: Plotly's own ticks up to two decades; beyond that
+  powers of ten only (`tickmode: "linear", dtick: 1`), since its in-between
+  labels there are bare digits ("2", "5") with no magnitude. No tickformat.
+- **Touch**: no drag-to-zoom (it traps page scrolling) and no toolbar (it
+  never hides without hover, and covers the range buttons).
+- **The Developed chart is net of costs** (since 2026-10-15; it plotted the
+  gross curve before, while its card's second CAGR row was net). Net is the
+  main line, gross a dashed line, and buy & hold reinvests dividends like
+  the Explorer's — so on a price-only series like SPX_MERGED it is far above
+  the old price-only line (11,845× vs 355× since 1928). It has the same
+  underwater panel as the Explorer, measured from the window's start, and
+  its all-time figures match the Explorer's exactly for the same strategy.
+- **Zoom → period.** Zooming offers the range as the Explorer's period (a
+  custom `{from, to}` that the whole tab is recomputed on) or as the
+  Developed chart's window (rebased to 1× on its first day).
+- **Leverage still encoded twice**: reduced leverage is a half-height amber
+  block on both the price and Developed charts (the Developed chart's used to
+  be full height), plus the exposure strip and a hover readout of what was
+  held that day.
+
 ## Where this is headed
 The gated (5x→3x vol-ratchet) version of the leverage explorer is the next
 addition, to quantify the gate's contribution directly.

@@ -11,7 +11,7 @@ window.Home = (function () {
     var cardsHtml = activeStrategies.map(function (s) {
       var prices = data[window.App.assetKey(s.liveAsset)];
       if (!prices || !prices.length) return "";
-      var status = window.StrategyEngine.computeStatus(prices, s);
+      var status = window.StrategyEngine.computeStatus(prices, s, ctx.decisionCosts ? ctx.decisionCosts(s) : null);
       var actions = '<div class="card-actions"><button class="winbtn" data-unhome="' + s.id + '"'
         + (ro ? ' disabled title="Run supabase/strategies.sql in Supabase to enable"' : '') + '>Remove from Home</button></div>';
       return window.RenderHelpers.renderStatusCard(s, status, actions);

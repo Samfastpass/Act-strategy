@@ -82,6 +82,7 @@ window.StrategyStore = (function () {
       leverage: { base: p.high, gated: gated ? p.low : null },
       latch: gated ? p.latch : undefined,
       outLeverage: p.out || 0,
+      costCap: p.cap > 0 ? p.cap : 0,   // %/yr; StrategyEngine.costCapLimits
       meterRange: cfg.asset === "BTC" ? { min: -6, max: 22 } : { min: -6, max: 14 },
       // Kept so the same strategy isn't added twice, and so it can be traced
       // back to the Explorer settings it came from.
@@ -91,7 +92,7 @@ window.StrategyStore = (function () {
 
   function sameSource(a, b) {
     return a && b && a.asset === b.asset && a.sizing === b.sizing
-      && SC.PARAM_ORDER.every(function (k) { return a.params[k] === b.params[k]; });
+      && SC.PARAM_ORDER.every(function (k) { return k === "cap" ? (a.params.cap || 0) === (b.params.cap || 0) : a.params[k] === b.params[k]; });
   }
 
   async function addFromConfig(cfg, name, existing) {

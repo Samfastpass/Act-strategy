@@ -1,25 +1,14 @@
-// Hand-rolled SVG equity chart: strategy vs. buy & hold, with an exposure
+// Developed-tab equity chart: strategy vs. buy & hold, with an exposure
 // strip underneath showing what the strategy was actually holding at the
-// time. No charting library — keeps the zero-build-step setup, and lets
-// the chart inherit the page's CSS variables in both themes.
+// time. Drawn with Plotly via js/plot.js (hover, zoom, PNG export); the
+// series are computed here, the colours come from the page's CSS variables.
 //
 // The y-axis is logarithmic. Over BTC's full history equity spans several
 // orders of magnitude, and on a linear axis the first decade would be an
 // indistinguishable flat line against the axis.
 window.Chart = (function () {
   var fmt = window.App.fmt;
-
-  // PAD_B/STRIP_GAP are sized so the exposure strip's caption clears the
-  // plot's own date labels — at the old spacing they sat 2px apart and
-  // overprinted each other.
-  var W = 720, H = 286, PAD_L = 46, PAD_R = 12, PAD_T = 12, PAD_B = 72;
-  var STRIP_H = 22, STRIP_GAP = 24;
-  var PLOT_W = W - PAD_L - PAD_R;
-  var PLOT_H = H - PAD_T - PAD_B;
-
-  function esc(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
+  var Plot = window.Plot;
 
   // Slice a date-keyed series to the trailing `years` (null = everything).
   function windowStartDate(lastDate, years) {
@@ -29,161 +18,206 @@ window.Chart = (function () {
     return d;
   }
 
-  function render(strategy, prices, equityCurve, walkResult, years) {
-    if (!equityCurve.length) return '<div class="loading">Not enough history to chart.</div>';
+  // Drawn by Plotly (js/plot.js) as one figure on a shared date axis, so zoom
+  // moves every panel together:
+  //   main (y over a hidden 0–1 base y)  equity, log scale, exposure blocks behind
+  //   y4                                  underwater: how far below the running peak
+  //   y3                                  exposure strip
+  // Trace order is what the legend's data-trace indexes point at:
+  // 0 full/sized blocks, 1 reduced blocks, 2 buy & hold, 3 strategy,
+  // 4 exposure strip, 5 underwater, 6 worst-point marker, 7 gross (if shown).
+  var MAIN_DOMAIN = [0.47, 1], UW_DOMAIN = [0.19, 0.37], STRIP_DOMAIN = [0, 0.1];
+  var TARGET_POINTS = 2400;
 
-    var lastDate = equityCurve[equityCurve.length - 1].date;
+  function yearsBetween(a, b) { return (new Date(b) - new Date(a)) / (864e5 * 365.25); }
+
+  // curves = {
+  //   net:   equity net of costs (StrategyEngine.backtestEquityCurve with costs), or null
+  //   gross: the same with no costs
+  //   hold:  buy & hold at 1x with dividends reinvested, or null for price only
+  // }   — all start on the walk's first day; the window rebases them to 1x.
+  // `years` = trailing window (null = all); `range` = { from, to } (to
+  // exclusive, either may be null) taken from a chart zoom, which wins.
+  // `costNote` describes what "net" includes, for the legend.
+  function render(strategy, prices, curves, walkResult, years, range, costNote) {
+    var primary = curves.net || curves.gross;
+    if (!primary.length) return '<div class="loading">Not enough history to chart.</div>';
+
+    var lastDate = primary[primary.length - 1].date;
     var cutoff = windowStartDate(lastDate, years);
 
-    // Align the price series to the equity curve's dates, then window both.
-    var priceByDate = {};
-    prices.forEach(function (p) { priceByDate[p.date] = p.close; });
-    var stateByDate = {};
-    prices.forEach(function (p, i) { stateByDate[p.date] = walkResult.state[i]; });
+    // Align everything to the equity curve's dates, then window.
+    var priceByDate = {}, stateByDate = {}, grossByDate = {}, holdByDate = {};
+    // `walkResult.held` (optional) is the leverage actually held each day after
+    // a cost cap; without one it's the walk's own state (or outLeverage while out).
+    var heldByDate = {};
+    prices.forEach(function (p, i) {
+      priceByDate[p.date] = p.close; stateByDate[p.date] = walkResult.state[i];
+      if (walkResult.held) heldByDate[p.date] = walkResult.held[i];
+    });
+    if (curves.net) curves.gross.forEach(function (e) { grossByDate[e.date] = e.equity; });
+    if (curves.hold) curves.hold.forEach(function (e) { holdByDate[e.date] = e.equity; });
 
-    var pts = equityCurve.filter(function (e) {
+    var pts = primary.filter(function (e) {
+      if (range) return (!range.from || e.date >= range.from) && (!range.to || e.date < range.to);
       return cutoff == null || new Date(e.date) >= cutoff;
     });
     if (pts.length < 2) return '<div class="loading">Not enough history for this window.</div>';
 
-    // Rebase both curves to 1.0 at the window start so they're comparable.
-    var eq0 = pts[0].equity, px0 = priceByDate[pts[0].date];
+    // Rebase to 1.0 at the window start so the curves are comparable, and
+    // measure drawdown from that start (the peak resets with the window).
+    var d0 = pts[0].date;
+    var eq0 = pts[0].equity, g0 = grossByDate[d0], h0 = curves.hold ? holdByDate[d0] : priceByDate[d0];
+    var peak = 1;
     var series = pts.map(function (e) {
+      var strat = eq0 > 0 ? e.equity / eq0 : 0;
+      if (strat > peak) peak = strat;
       return {
-        date: e.date,
-        strat: e.equity / eq0,
-        hold: priceByDate[e.date] / px0,
-        state: stateByDate[e.date] || 0
+        date: e.date, strat: strat,
+        gross: curves.net && g0 > 0 ? grossByDate[e.date] / g0 : null,
+        hold: (curves.hold ? holdByDate[e.date] : priceByDate[e.date]) / h0,
+        dd: peak > 0 ? strat / peak - 1 : -1,
+        state: stateByDate[e.date] || 0,
+        held: walkResult.held ? heldByDate[e.date] || 0 : null
       };
     });
 
-    var lo = Infinity, hi = -Infinity;
-    series.forEach(function (s) {
-      lo = Math.min(lo, s.strat, s.hold);
-      hi = Math.max(hi, s.strat, s.hold);
-    });
-    lo = Math.max(lo, 1e-6);
-    var logLo = Math.log10(lo), logHi = Math.log10(hi);
-    if (logHi - logLo < 0.05) { logHi = logLo + 0.05; } // guard a flat window
-
-    var t0 = new Date(series[0].date).getTime();
-    var t1 = new Date(series[series.length - 1].date).getTime();
-    var spanT = Math.max(1, t1 - t0);
-
-    function x(dateStr) { return PAD_L + ((new Date(dateStr).getTime() - t0) / spanT) * PLOT_W; }
-    function y(v) { return PAD_T + (1 - (Math.log10(Math.max(v, 1e-6)) - logLo) / (logHi - logLo)) * PLOT_H; }
-
-    function path(key) {
-      var d = "";
-      for (var i = 0; i < series.length; i++) {
-        d += (i ? "L" : "M") + x(series[i].date).toFixed(1) + " " + y(series[i][key]).toFixed(1);
-      }
-      return d;
-    }
-
-    // Gridlines evenly spaced in log space. Decade-only ticks would draw a
-    // single line on a 1x–3x window and a dozen on BTC's full history, so
-    // pick ~4 steps across whatever range this window actually spans and
-    // snap each to a readable 1/2/5 value.
-    function niceLog(v) {
-      var p = Math.floor(Math.log10(v));
-      var base = Math.pow(10, p);
-      var m = v / base;
-      var snapped = m < 1.5 ? 1 : (m < 3.5 ? 2 : (m < 7.5 ? 5 : 10));
-      return snapped * base;
-    }
-    var gridlines = "";
-    var seen = {};
-    for (var g = 0; g <= 4; g++) {
-      var gv = niceLog(Math.pow(10, logLo + (logHi - logLo) * (g / 4)));
-      if (seen[gv] || gv <= 0) continue;
-      seen[gv] = true;
-      var gy = y(gv);
-      if (gy < PAD_T - 1 || gy > PAD_T + PLOT_H + 1) continue;
-      var label = gv >= 1 ? fmt(gv, 0) : gv.toPrecision(2);
-      gridlines += '<line x1="' + PAD_L + '" y1="' + gy.toFixed(1) + '" x2="' + (W - PAD_R) + '" y2="' + gy.toFixed(1) + '" class="ch-grid"/>'
-        + '<text x="' + (PAD_L - 6) + '" y="' + (gy + 3.5).toFixed(1) + '" class="ch-axis" text-anchor="end">'
-        + label + '×</text>';
-    }
-
-    // X labels: first, middle, last.
-    var xticks = "";
-    [0, Math.floor(series.length / 2), series.length - 1].forEach(function (i, k) {
-      var s = series[i];
-      var anchor = k === 0 ? "start" : (k === 2 ? "end" : "middle");
-      xticks += '<text x="' + x(s.date).toFixed(1) + '" y="' + (PAD_T + PLOT_H + 16) + '" class="ch-axis" text-anchor="' + anchor + '">' + s.date.slice(0, 7) + '</text>';
-    });
-
-    // Exposure strip: one bar per day, height scaled to the window's max
-    // exposure so it reads for both 0/3/5x leverage and 0–100% sizing.
-    var maxState = series.reduce(function (m, s) { return Math.max(m, s.state); }, 0) || 1;
-
-    // Background blocks behind the curves, coloured by exposure level, with
-    // contiguous runs of equal exposure merged into single rects (the ratchet
-    // and the no-trade band both produce long runs, so this is a handful of
-    // rects rather than one per day).
-    //
-    // Colour alone must not carry the leverage — green vs amber is a hard pair
-    // for red-green colour blindness — so the height strip below stays, and
-    // the legend names each level.
     var isVolTgt = (strategy.sizing || {}).mode === "volTarget";
+    // A strategy added from the Explorer can hold leverage below the SMA.
+    var outLev = strategy.outLeverage || 0;
+    series.forEach(function (s) { if (s.held == null) s.held = s.state > 0 ? s.state : outLev; });
+    var maxState = series.reduce(function (m, s) { return Math.max(m, s.state, s.held); }, outLev) || 1;
     var gated = strategy.leverage && strategy.leverage.gated;
-    var blocks = "", runStart = null, runVal = 0;
-    function flushRun(endIdx) {
-      if (runStart === null || runVal <= 0) return;
-      var bx0 = x(series[runStart].date), bx1 = x(series[endIdx].date);
-      // Continuous sizing gets one hue at proportional opacity; a discrete
-      // ratchet gets distinct classes per level.
-      var cls = isVolTgt ? "blk-full" : (gated && runVal < strategy.leverage.base ? "blk-reduced" : "blk-full");
-      var op = isVolTgt ? (0.10 + 0.20 * (runVal / maxState)).toFixed(3) : "";
-      blocks += '<rect x="' + bx0.toFixed(1) + '" y="' + PAD_T + '" width="' + Math.max(0.5, bx1 - bx0).toFixed(1)
-        + '" height="' + PLOT_H + '" class="ch-blk ' + cls + '"'
-        + (op ? ' style="opacity:' + op + '"' : '') + '/>';
+    var base = strategy.leverage ? strategy.leverage.base : 1;
+
+    // Block height carries the level as well as the colour (green vs amber is
+    // a hard pair for red-green colour blindness): a vol-target position's
+    // height is its size; a ratcheted-down position is half height.
+    // "Reduced" = in, but holding less than the base leverage: a vol-gate
+    // ratchet, or a cost cap trimming it.
+    function fullLevel(i) {
+      var s = series[i];
+      if (!(s.state > 0)) return 0;
+      if (isVolTgt) return s.held / maxState;
+      return s.held < base ? 0 : 1;
     }
-    series.forEach(function (s, i) {
-      if (s.state !== runVal) { flushRun(i - 1 < 0 ? 0 : i - 1); runStart = i; runVal = s.state; }
-      if (i === series.length - 1) flushRun(i);
-    });
+    function reducedLevel(i) { var s = series[i]; return !isVolTgt && s.state > 0 && s.held < base ? 0.5 : 0; }
+    function dateAt(i) { return series[i].date; }
+    var last = series.length - 1;
+    var fullSteps = Plot.steps(dateAt, fullLevel, 0, last);
+    var downSteps = Plot.steps(dateAt, reducedLevel, 0, last);
+    var stripSteps = Plot.steps(dateAt, function (i) { return series[i].held; }, 0, last);
 
-    var stripY = PAD_T + PLOT_H + STRIP_GAP + 14;
-    var barW = Math.max(0.6, PLOT_W / series.length);
-    var bars = "";
+    var worstI = 0;
+    series.forEach(function (s, i) { if (s.dd < series[worstI].dd) worstI = i; });
+    var worst = series[worstI];
+    var ruinI = series.findIndex(function (s) { return !(s.strat > 0); });
+
+    // Min/max-preserving decimation; the worst day and a wipeout are always kept,
+    // so the drawn trough is the labelled one.
+    var keep = Plot.decimate(series.length, TARGET_POINTS,
+      [function (i) { return series[i].strat; }, function (i) { return series[i].hold; }, function (i) { return series[i].dd; }],
+      [worstI, ruinI, ruinI - 1]);
+    var kd = keep.map(dateAt);
+    function heldText(i) {
+      var s = series[i];
+      if (!(s.state > 0)) return outLev ? "below the SMA, holding " + s.held + "×" : "out, in cash";
+      if (isVolTgt) return "holding " + Math.round(s.held * 100) + "%";
+      return "in at " + fmt(s.held, 0) + "×" + (s.held < s.state ? " (cost cap)" : "");
+    }
+
+    var lastPt = series[last];
+    var eMin = Infinity, eMax = 0;
     series.forEach(function (s) {
-      if (s.state <= 0) return;
-      var h = (s.state / maxState) * STRIP_H;
-      bars += '<rect x="' + x(s.date).toFixed(1) + '" y="' + (stripY + STRIP_H - h).toFixed(1)
-        + '" width="' + barW.toFixed(2) + '" height="' + h.toFixed(1) + '" class="ch-expo"/>';
+      [s.strat, s.hold, s.gross].forEach(function (v) { if (v > 0) { eMin = Math.min(eMin, v); eMax = Math.max(eMax, v); } });
     });
-
-    var last = series[series.length - 1];
-    var isVolTarget = (strategy.sizing || {}).mode === "volTarget";
-    var expoLabel = isVolTarget
+    var expoLabel = isVolTgt
       ? "Exposure (0–" + Math.round(maxState * 100) + "%)"
       : "Exposure (0–" + fmt(maxState, 0) + "×)";
+    var worstText = "worst " + fmt(worst.dd * 100, 1) + "% · " + worst.date;
+    var worstRight = worstI > series.length * 0.7;
+    var recovered = null;
+    for (var r = worstI; r < series.length; r++) { if (series[r].dd >= -0.0001) { recovered = series[r].date; break; } }
+    var netLabel = curves.net ? "Strategy, net of costs" : "Strategy (gross — no cost data for this asset)";
+
+    var slot = Plot.slot({
+      height: 470, key: "developed-equity", group: "developed", legendScope: ".chart-wrap",
+      label: (strategy.rawName || strategy.name) + " strategy versus buy and hold, log scale, with drawdown and exposure panels",
+      build: function (t) {
+        var stepLine = { width: 0, shape: "hv" };
+        var data = [
+          { x: fullSteps.x, y: fullSteps.y, type: "scatter", mode: "lines", name: "In", line: stepLine,
+            fill: "tozeroy", fillcolor: t.alpha(t.long, 0.13), hoverinfo: "skip" },
+          { x: downSteps.x, y: downSteps.y, type: "scatter", mode: "lines", name: "Ratcheted down", line: stepLine,
+            fill: "tozeroy", fillcolor: t.alpha(t.flat, 0.2), hoverinfo: "skip" },
+          { x: kd, y: keep.map(function (i) { return series[i].hold; }), yaxis: "y2", type: "scatter", mode: "lines", name: "Buy & hold",
+            line: { color: t.inkFaint, width: 1.2 }, hovertemplate: "Buy & hold %{y:,.2f}×<extra></extra>" },
+          // Zero has no place on a log axis: after a wipeout the line stops.
+          { x: kd, y: keep.map(function (i) { return series[i].strat > 0 ? series[i].strat : null; }), yaxis: "y2", type: "scatter", mode: "lines", name: "Strategy",
+            line: { color: t.long, width: 1.6 }, customdata: keep.map(heldText),
+            hovertemplate: (curves.net ? "Net" : "Strategy") + " %{y:,.2f}× · %{customdata}<extra></extra>" },
+          { x: stripSteps.x, y: stripSteps.y, yaxis: "y3", type: "scatter", mode: "lines", name: "Exposure",
+            line: { color: t.long, width: 1, shape: "hv" }, fill: "tozeroy", fillcolor: t.alpha(t.long, 0.6), hoverinfo: "skip" },
+          { x: kd, y: keep.map(function (i) { return series[i].dd * 100; }), yaxis: "y4", type: "scatter", mode: "lines", name: "Underwater",
+            fill: "tozeroy", fillcolor: t.alpha(t.warn, 0.22), line: { color: t.alpha(t.warn, 0.55), width: 1 },
+            hovertemplate: "Below peak %{y:.1f}%<extra></extra>" },
+          { x: [worst.date], y: [worst.dd * 100], yaxis: "y4", type: "scatter", mode: "markers", name: "Worst",
+            marker: { color: t.warn, size: 7, line: { color: t.card, width: 1.5 } }, hoverinfo: "skip" }
+        ];
+        if (curves.net) data.push({ x: kd, y: keep.map(function (i) { return series[i].gross; }), yaxis: "y2", type: "scatter", mode: "lines", name: "Gross",
+          line: { color: t.long, width: 1, dash: "3px,3px" }, opacity: 0.55, hovertemplate: "Gross %{y:,.2f}×<extra></extra>" });
+        var stripAxis = Plot.axisStyle(t);
+        delete stripAxis.gridcolor;   // the strip has no grid
+        var caption = function (text, y) {
+          return { text: text, x: 0, xref: "paper", y: y, yref: "paper", xanchor: "left", yanchor: "bottom", showarrow: false, font: { size: 10, color: t.inkFaint } };
+        };
+        var shapes = [], notes = [
+          caption(expoLabel, STRIP_DOMAIN[1]),
+          caption("Underwater — how far below the previous peak", UW_DOMAIN[1]),
+          { text: worstText, x: worst.date, xref: "x", y: worst.dd * 100, yref: "y4", xanchor: worstRight ? "right" : "left", yanchor: "top", xshift: worstRight ? -8 : 8, showarrow: false, font: { size: 10, color: t.warn } }
+        ];
+        if (ruinI > 0) {
+          shapes.push({ type: "line", xref: "x", yref: "paper", x0: series[ruinI].date, x1: series[ruinI].date, y0: MAIN_DOMAIN[0], y1: MAIN_DOMAIN[1], line: { color: t.warn, width: 1, dash: "dot" } });
+          notes.push({ text: "wiped out " + series[ruinI].date, x: series[ruinI].date, xref: "x", y: MAIN_DOMAIN[1], yref: "paper", xanchor: "left", yanchor: "top", xshift: 5, showarrow: false, font: { size: 10, color: t.warn } });
+        }
+        return {
+          data: data,
+          layout: {
+            margin: { l: 60, r: 14, t: 8, b: 28 },
+            xaxis: { anchor: "y3" },
+            yaxis: { domain: MAIN_DOMAIN, range: [0, 1], visible: false, fixedrange: true },
+            yaxis2: Object.assign(Plot.axisStyle(t), { overlaying: "y", side: "left" }, Plot.logAxis(eMin, eMax, "×")),
+            yaxis3: Object.assign(stripAxis, { domain: STRIP_DOMAIN, range: [0, maxState], showgrid: false, fixedrange: true,
+              tickvals: [0, maxState], ticktext: ["0", isVolTgt ? Math.round(maxState * 100) + "%" : fmt(maxState, 0) + "×"] }),
+            yaxis4: Object.assign(Plot.axisStyle(t), { domain: UW_DOMAIN, range: [-102, 2], tickvals: [-100, -50, 0], ticktext: ["−100%", "−50%", "0%"],
+              zeroline: true, zerolinecolor: t.inkFaint, zerolinewidth: 1 }),
+            annotations: notes, shapes: shapes
+          }
+        };
+      }
+    });
 
     return ''
       + '<div class="chart-wrap">'
-      + '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" preserveAspectRatio="xMidYMid meet" role="img" '
-      + 'aria-label="' + esc(strategy.rawName || strategy.name) + ' strategy versus buy and hold, log scale, shaded by position size">'
-      + blocks
-      + gridlines
-      + '<path d="' + path("hold") + '" class="ch-hold"/>'
-      + '<path d="' + path("strat") + '" class="ch-strat"/>'
-      + xticks
-      + '<text x="' + PAD_L + '" y="' + (stripY - 4) + '" class="ch-axis">' + expoLabel + '</text>'
-      + '<rect x="' + PAD_L + '" y="' + stripY + '" width="' + PLOT_W + '" height="' + STRIP_H + '" class="ch-strip-bg"/>'
-      + bars
-      + '</svg>'
+      + slot
       + '<div class="ch-legend">'
-      + '<span><i class="sw-strat"></i>Strategy <b>' + fmt(last.strat, 2) + '×</b></span>'
-      + '<span><i class="sw-hold"></i>Buy &amp; hold <b>' + fmt(last.hold, 2) + '×</b></span>'
+      + '<span data-trace="3"><i class="sw-strat"></i>' + netLabel + ' <b>' + (lastPt.strat > 0 ? fmt(lastPt.strat, 2) + '×' : '0 — wiped out') + '</b></span>'
+      + (curves.net ? '<span data-trace="7"><i class="sw-gross"></i>Gross, before costs <b>' + fmt(lastPt.gross, 2) + '×</b></span>' : '')
+      + '<span data-trace="2"><i class="sw-hold"></i>Buy &amp; hold (1×' + (curves.hold ? ', dividends reinvested' : '') + ') <b>' + fmt(lastPt.hold, 2) + '×</b></span>'
       + (isVolTgt
-        ? '<span><i class="sw-blk-full"></i>Invested &mdash; deeper shading is a bigger position</span>'
+        ? '<span data-trace="0"><i class="sw-blk-full"></i>Invested &mdash; taller shading is a bigger position</span>'
         : (gated
-          ? '<span><i class="sw-blk-full"></i>In at ' + fmt(strategy.leverage.base, 0) + '×</span>'
-            + '<span><i class="sw-blk-reduced"></i>Ratcheted to ' + fmt(gated, 0) + '×</span>'
-          : '<span><i class="sw-blk-full"></i>In the market</span>'))
-      + '<span class="ch-note">unshaded = out, in cash &middot; rebased to 1× at ' + series[0].date + ' &middot; log scale</span>'
+          ? '<span data-trace="0"><i class="sw-blk-full"></i>In at ' + fmt(strategy.leverage.base, 0) + '× (full height)</span>'
+            + '<span data-trace="1"><i class="sw-blk-reduced"></i>' + (strategy.costCap > 0 ? 'Reduced &mdash; vol ratchet or cost cap' : 'Ratcheted to ' + fmt(gated, 0) + '×') + ' (half height)</span>'
+          : '<span data-trace="0"><i class="sw-blk-full"></i>In the market</span>'
+            + (strategy.costCap > 0 ? '<span data-trace="1"><i class="sw-blk-reduced"></i>Cut by the cost cap (half height)</span>' : '')))
+      + '<span class="ch-note">' + (outLev ? 'unshaded = below the SMA, held at ' + outLev + '&times;' : 'unshaded = out, in cash') + ' &middot; rebased to 1× at ' + series[0].date + ' &middot; log scale</span>'
+      + '</div>'
+      + '<div class="toolsrow">'
+      + (curves.net ? 'Net of ' + (costNote || 'fees, financing and slippage') + ' &mdash; the same cost model as the Strategy Explorer and Evaluator. Buy &amp; hold is cost-free. ' : '')
+      + 'Worst drawdown in this window <strong>' + fmt(worst.dd * 100, 1) + '%</strong> (' + worst.date + '); '
+      + (recovered ? 'back to its previous peak on ' + recovered + ', ' + fmt(yearsBetween(worst.date, recovered), 1) + ' years after the low.'
+                   : 'not back to its previous peak by the end of this window.')
       + '</div>'
       + '</div>';
   }

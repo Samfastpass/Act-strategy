@@ -13,7 +13,8 @@ window.RenderHelpers = (function () {
     if (status.state === 0) return strategy.outLeverage ? "Out, holding " + strategy.outLeverage + "x" : "Out / cash";
     if (isVolTarget(strategy)) return "In / long, " + Math.round(status.state * 100) + "%";
     var lev = strategy.leverage || {};
-    if (lev.gated != null || lev.base > 1) return "In / long, " + status.state + "x";
+    var capped = status.uncapped != null && status.state < status.uncapped;
+    if (lev.gated != null || lev.base > 1) return "In / long, " + status.state + "x" + (capped ? " (cost cap)" : "");
     return "In / long";
   }
 
@@ -27,6 +28,7 @@ window.RenderHelpers = (function () {
         + " at " + strategy.volLen + "d vol &ge; " + fmt(strategy.volGate * 100, 0) + "%");
     } else if (lev.base > 1) bits.push(lev.base + "x");
     if (strategy.outLeverage) bits.push(strategy.outLeverage + "x below the SMA");
+    if (strategy.costCap > 0) bits.push("cost cap &le;" + strategy.costCap + "%/yr");
     return bits.join(" &middot; ");
   }
 

@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The site itself has no build step, package manager, linter, or test suite:
 `index.html` plus plain `<script src>` files under `js/` — no bundler, no
-dependencies beyond a CDN-loaded `@supabase/supabase-js`.
+dependencies beyond a CDN-loaded `@supabase/supabase-js` and Plotly (the
+`plotly.js-basic-dist-min` build, pinned with an SRI hash and loaded lazily by
+`js/plot.js` the first time a chart is shown).
 
 - **Run locally**: serve the directory with a static file server (e.g.
   `python -m http.server`) and open it. Opening `index.html` directly via
@@ -139,6 +141,17 @@ is, never its index in some list** (period 0 means "All" on one tab and "2020s"
 on the other — keying on the index served one tab's numbers to the other), and
 **a tab that reads shared session state re-renders when shown**, because
 `switchTab` only toggles `display`.
+
+**Charts are Plotly, drawn through `js/plot.js` only.** The chart modules
+(`chart.js`, `price-chart.js`, `perf-chart.js`, `fee-chart.js`) compute their
+series and return HTML with a `Plot.slot(spec)` placeholder; the caller must
+call `Plot.mount(container)` after setting `innerHTML`, and `switchTab` mounts
+the shown tab — a hidden tab's charts are drawn when it is shown, because
+Plotly sizes a hidden div to nothing. Give a spec a stable `key` so a rerender
+updates the plot with `Plotly.react` (~20 ms) instead of `newPlot` (~240 ms),
+and a `group` to share its zoom. Run `Plotly.validate` on any new figure —
+Plotly silently ignores attributes it doesn't know. Trace order is load-bearing:
+the HTML legend's `data-trace` indexes point at it.
 
 Position/leverage is encoded **twice** on every chart that shows it —
 colour plus bar height or an explicit label — because green vs amber is a

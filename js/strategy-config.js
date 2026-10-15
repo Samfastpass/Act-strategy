@@ -20,7 +20,7 @@ window.StrategyConfig = (function () {
   // leveraged product, so there is nothing to gate.
   var ASSETS = [
     { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED",
-      live: { sizing: "gated", params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true } },
+      live: { sizing: "gated", params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 0 } },
       gate: { options: [16, 18, 20, 22, 25, 30], def: 22 } },
     { key: "BTC", label: "Bitcoin", backtestAsset: "BTC", live: null, gate: null },
     { key: "GOLD", label: "Gold", backtestAsset: "GOLD", live: null, gate: { options: [10, 12, 15, 18, 22], def: 15 } },
@@ -37,9 +37,14 @@ window.StrategyConfig = (function () {
     out:    { label: "Below the SMA",  short: "Below SMA", gated: false, fmt: function (v) { return v === 0 ? "cash" : v + "×"; } },
     volwin: { label: "Vol window",     short: "Vol win",   gated: true,  fmt: function (v) { return v + "d"; }, num: { min: 2, max: 250, step: 5 } },
     gate:   { label: "Vol gate",       short: "Gate",      gated: true,  fmt: function (v) { return v + "%"; }, num: { min: 1, max: 150, step: 1 } },
-    latch:  { label: "Latch",          short: "Latch",     gated: true,  fmt: function (v) { return v ? "latched" : "unlatched"; } }
+    latch:  { label: "Latch",          short: "Latch",     gated: true,  fmt: function (v) { return v ? "latched" : "unlatched"; } },
+    // Cost cap, % a year (0 = off): never hold more leverage than costs this
+    // much all-in at that month's interest rate (StrategyEngine.costCapLimits).
+    cap:    { label: "Cost cap",       short: "Cost cap",  gated: false, fmt: function (v) { return v > 0 ? "≤" + v + "%/yr" : "off"; } }
   };
-  var PARAM_ORDER = ["sma", "buffer", "high", "low", "out", "volwin", "gate", "latch"];
+  var PARAM_ORDER = ["sma", "buffer", "high", "low", "out", "volwin", "gate", "latch", "cap"];
+  var CAP_OPTIONS = [0, 10, 15, 20, 25, 30, 40];   // matrix axis values (0 = off)
+  var CAP_SLIDER = { min: 5, max: 60, step: 1, def: 25 };
   var ALL_LEVERAGES = [1, 2, 3, 5];
   var OUT_LEVERAGES = [0, 1, 2, 3];
   var VOL_WINDOWS = [10, 20, 30, 60];
@@ -82,6 +87,7 @@ window.StrategyConfig = (function () {
   // Clamps a parameter set to what the asset and sizing mode allow. Mutates.
   function normalize(cfg, costs) {
     var p = cfg.params, a = assetConfig(cfg.asset);
+    if (!(p.cap > 0)) p.cap = 0;   // configs saved before the cost cap existed
     if (p.high > costs.maxLeverage) p.high = costs.maxLeverage;
     if (a && !a.gate && cfg.sizing === "gated") cfg.sizing = "fixed";
     if (cfg.sizing === "gated" && p.high > 1) {
@@ -107,8 +113,9 @@ window.StrategyConfig = (function () {
     }
     var base = p.sma + "d SMA / " + p.buffer + "% buffer";
     var below = p.out > 0 ? " · " + p.out + "× below the SMA" : "";
-    if (gs && gs.enabled) return base + " · " + gs.high + "×→" + gs.low + "× " + (gs.latch ? "latched" : "unlatched") + " · " + gs.volLen + "d vol ≥ " + gs.gatePct + "%" + below;
-    return base + " · " + p.high + "×" + (p.out > 0 ? below : " in/out");
+    var cap = p.cap > 0 ? " · cost cap ≤" + p.cap + "%/yr" : "";
+    if (gs && gs.enabled) return base + " · " + gs.high + "×→" + gs.low + "× " + (gs.latch ? "latched" : "unlatched") + " · " + gs.volLen + "d vol ≥ " + gs.gatePct + "%" + below + cap;
+    return base + " · " + p.high + "×" + (p.out > 0 ? below : " in/out") + cap;
   }
 
   function gateLabel(gs) {
@@ -143,13 +150,28 @@ window.StrategyConfig = (function () {
   // `tier` = { out, high }: what is held while OUT, and (for a fixed-leverage
   // walk) the leverage while IN. Neither changes the walk itself, so the cached
   // walk is shared and `out` is layered on a shallow copy.
+  // tier.capAt / tier.capPct: a cost cap (costCapFor), layered on the same way.
   function walkFor(prices, assetKey, smaLen, bufferPct, gs, tier) {
     var base = walkBase(prices, assetKey, smaLen, bufferPct, gs);
-    var out = (tier && tier.out) || 0;
-    if (!out) return base;
-    var copy = Object.assign({}, base, { out: out });
-    copy.label = (base.gated ? base.label : tier.high + "× above the SMA") + ", " + out + "× below";
+    var out = (tier && tier.out) || 0, capAt = (tier && tier.capAt) || null;
+    if (!out && !capAt) return base;
+    var copy = Object.assign({}, base, { out: out, capAt: capAt });
+    if (out) copy.label = (base.gated ? base.label : tier.high + "× above the SMA") + ", " + out + "× below";
+    if (capAt) copy.label = (copy.label || tier.high + "×") + ", cost cap ≤" + tier.capPct + "%/yr";
     return copy;
+  }
+
+  // The cost cap's per-day leverage limit for this asset, costs and cap,
+  // cached: it depends only on the dates, the rate series and the products.
+  var capCache = {};
+  function costCapFor(env, capPct) {
+    if (!(capPct > 0)) return null;
+    var key = env.stamp + "|" + env.costSig + "|" + capPct;
+    if (!capCache[key]) {
+      if (Object.keys(capCache).length > 200) capCache = {};
+      capCache[key] = window.StrategyEngine.costCapLimits(env.prices, capPct, env.ec);
+    }
+    return capCache[key];
   }
 
   function walkBase(prices, assetKey, smaLen, bufferPct, gs) {
@@ -332,10 +354,11 @@ window.StrategyConfig = (function () {
     var p = cfg.params;
     var key = env.stamp + "|" + periodSig(env.period) + "|" + env.costSig + "|"
       + (r.gs.enabled ? ["g", p.sma, p.buffer, p.volwin, p.gate, p.high, p.low, p.latch, p.out].join(":")
-                      : ["f", p.sma, p.buffer, p.high, p.out].join(":"));
+                      : ["f", p.sma, p.buffer, p.high, p.out].join(":"))
+      + "|cap" + (p.cap > 0 ? p.cap : 0);
     if (statsCache[key]) return statsCache[key];
     if (Object.keys(statsCache).length > 4000) statsCache = {};
-    var wk = walkFor(env.prices, cfg.asset, p.sma, p.buffer, r.gs, { out: p.out, high: p.high });
+    var wk = walkFor(env.prices, cfg.asset, p.sma, p.buffer, r.gs, { out: p.out, high: p.high, capAt: costCapFor(env, p.cap), capPct: p.cap });
     statsCache[key] = windowStats(env.prices, wk, env.period, p.high, env.ec);
     return statsCache[key];
   }
@@ -381,7 +404,7 @@ window.StrategyConfig = (function () {
     // Saving the same thing twice is almost always a mis-click.
     var dupe = list.filter(function (e) {
       return e.asset === entry.asset && e.sizing === entry.sizing
-        && PARAM_ORDER.every(function (k) { return e.params[k] === entry.params[k]; });
+        && PARAM_ORDER.every(function (k) { return k === "cap" ? (e.params.cap || 0) === (entry.params.cap || 0) : e.params[k] === entry.params[k]; });
     })[0];
     if (dupe) return { error: "That exact configuration is already saved as “" + (dupe.name || describe(dupe, null)) + "”.", existing: dupe.id };
     list.push(entry);
@@ -409,11 +432,12 @@ window.StrategyConfig = (function () {
   return {
     ASSETS: ASSETS, PARAMS: PARAMS, PARAM_ORDER: PARAM_ORDER,
     ALL_LEVERAGES: ALL_LEVERAGES, OUT_LEVERAGES: OUT_LEVERAGES, VOL_WINDOWS: VOL_WINDOWS,
+    CAP_OPTIONS: CAP_OPTIONS, CAP_SLIDER: CAP_SLIDER, costCapFor: costCapFor,
     MAX_SAVED: MAX_SAVED, session: session,
     assetConfig: assetConfig, isGated: isGated, minAbove: minAbove, resolve: resolve,
     normalize: normalize, describe: describe, gateLabel: gateLabel,
     walkFor: walkFor, periodBounds: periodBounds, windowStats: windowStats,
-    evaluate: evaluate, benchmark: benchmark,
+    evaluate: evaluate, benchmark: benchmark, periodSig: periodSig,
     costConfigFor: costConfigFor, refSeriesFn: refSeriesFn, engineCostsFrom: engineCostsFrom, costVariant: costVariant,
     saved: saved, save: save, remove: remove, rename: rename, reorder: reorder
   };

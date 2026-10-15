@@ -50,8 +50,14 @@ window.Explorer = (function () {
   // The single current strategy. Defaults to the live S&P strategy.
   var state = {
     asset: "SP500", periodIdx: 0, grid: "broad", metric: "calmar",
+    // A period taken from a chart zoom ({ from, to }, to exclusive) — overrides
+    // periodIdx until cleared or another period/asset is picked.
+    custom: null,
     sizing: "gated",
-    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true },
+    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 0 },
+    // The cost-cap slider's value, remembered while the switch is off
+    // (params.cap is 0 then — off — so the matrices see it as off).
+    capValue: SC.CAP_SLIDER.def,
     matrices: [{ x: "buffer", y: "sma" }, { x: "low", y: "high" }],
     perfMode: "total", annMode: "calendar"
   };
@@ -63,6 +69,28 @@ window.Explorer = (function () {
   function assetConfig(key) { return SC.assetConfig(key); }
 
   // This tab's current strategy as a StrategyConfig descriptor.
+  function currentPeriod() {
+    if (!state.custom) return PERIODS[state.periodIdx];
+    return { label: customLabel(state.custom), from: state.custom.from, to: state.custom.to };
+  }
+  function shiftDay(d, n) {
+    var t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n);
+    return t.toISOString().slice(0, 10);
+  }
+  // Period `to` is exclusive; the label shows the last day included.
+  function customLabel(c) { return (c.from || "start") + " → " + (c.to ? shiftDay(c.to, -1) : "today"); }
+  // A zoomed chart range [from, to] (inclusive dates) -> a period. A range
+  // reaching past the last price stays open-ended, so new days still count.
+  function periodFromRange(r, data) {
+    var prices = data[window.App.assetKey(assetConfig(state.asset).backtestAsset)] || [];
+    var last = prices.length ? prices[prices.length - 1].date : null;
+    var first = prices.length ? prices[0].date : null;
+    return {
+      from: first && r[0] <= first ? null : r[0],
+      to: last && r[1] >= last ? null : shiftDay(r[1], 1)
+    };
+  }
+
   function curCfg(params) { return { asset: state.asset, sizing: state.sizing, params: params || state.params }; }
 
   var MAX_MATRICES = 3;
@@ -107,9 +135,10 @@ window.Explorer = (function () {
         list = fine;
       }
     } else if (key === "latch") list = [true, false];
+    else if (key === "cap") list = SC.CAP_OPTIONS;
     else list = [];
     var cur = state.params[key];
-    if ((key === "sma" || key === "buffer" || key === "volwin" || key === "gate") && list.length && list.indexOf(cur) < 0) {
+    if ((key === "sma" || key === "buffer" || key === "volwin" || key === "gate" || key === "cap") && list.length && list.indexOf(cur) < 0) {
       list = list.concat([cur]).sort(function (a, b) { return a - b; });
     }
     return list;
@@ -172,8 +201,10 @@ window.Explorer = (function () {
       + '</div></div>'
       + '<div class="exp-ctl"><label>Period</label><div class="winbtns">'
       + btnRow(PERIODS.map(function (p, i) { return { label: p.label, i: i }; }),
-               function (it) { return it.i === state.periodIdx; },
+               function (it) { return !state.custom && it.i === state.periodIdx; },
                function (it) { return 'data-period="' + it.i + '"'; })
+      + (state.custom ? '<button class="winbtn active" data-period-clear="1" title="Back to ' + PERIODS[state.periodIdx].label + '">'
+          + customLabel(state.custom) + ' &times;</button>' : '')
       + '</div></div>'
       + '<div class="exp-ctl"><label>Grid</label><div class="winbtns">'
       + btnRow([{ label: "Broad", g: "broad" }, { label: "Zoomed", g: "zoom" }],
@@ -198,10 +229,10 @@ window.Explorer = (function () {
   function paramBarHTML(costs, gs) {
     var asset = assetConfig(state.asset), p = state.params, gated = isGated(asset);
 
-    function field(key, inner) {
+    function field(key, inner, labelExtra) {
       var dim = PARAMS[key].gated && !gated;
       return '<div class="pb-field' + (dim ? " dim" : "") + '"' + (dim ? ' title="Only used when sizing is vol-gated"' : "") + '>'
-        + '<label>' + PARAMS[key].label + '</label>' + inner + '</div>';
+        + '<label>' + PARAMS[key].label + (labelExtra || "") + '</label>' + inner + '</div>';
     }
     function num(key) {
       var n = PARAMS[key].num, dis = PARAMS[key].gated && !gated;
@@ -213,6 +244,15 @@ window.Explorer = (function () {
         var off = disabledFn && disabledFn(v);
         return '<option value="' + v + '"' + (v === p[key] ? " selected" : "") + (off ? " disabled" : "") + '>' + PARAMS[key].fmt(v) + (off ? (key === "out" ? " (not below the lowest held above)" : " (no product)") : "") + '</option>';
       }).join("") + '</select>';
+    }
+
+    // Switch + slider: the switch turns the cap on at the slider's value.
+    function capControl() {
+      var on = p.cap > 0, v = on ? p.cap : state.capValue, sl = SC.CAP_SLIDER;
+      return '<div class="cap-ctl"><label class="cap-switch" title="Never hold more leverage than costs this much a year, all-in, at that month&#8217;s interest rate">'
+        + '<input type="checkbox" data-cap-on="1"' + (on ? " checked" : "") + '><span>' + (on ? "On" : "Off") + '</span></label>'
+        + '<input type="range" data-cap-slider="1" min="' + sl.min + '" max="' + sl.max + '" step="' + sl.step + '" value="' + v + '"' + (on ? "" : " disabled") + ' aria-label="Maximum all-in cost, % a year">'
+        + '</div>';
     }
 
     var sizing = '<div class="pb-field"><label>Sizing</label><div class="winbtns">'
@@ -244,6 +284,7 @@ window.Explorer = (function () {
       + field("out", select("out", outs, function (l) { return l >= ceil; }))
       + field("volwin", num("volwin")) + field("gate", num("gate"))
       + field("latch", select("latch", [true, false]))
+      + field("cap", capControl(), ' <span class="cap-val">&le;' + (p.cap > 0 ? p.cap : state.capValue) + '%/yr</span>')
       + '</div>' + note
       + (gs.enabled ? '<div class="toolsrow">' + gateSummary(gs) + '</div>' : "");
   }
@@ -267,7 +308,8 @@ window.Explorer = (function () {
       rateNow: rate.loaded ? rate.latestValue : 0, rateNowMonth: rate.latest,
       rateEarliest: rate.loaded ? rate.earliest : null,
       divFn: divFn, from: from, to: to,
-      productName: prod.name, quotedCharge: prod.mgmtFeePct + prod.dailySwapRatePct * 360
+      productName: prod.name, quotedCharge: prod.mgmtFeePct + prod.dailySwapRatePct * 360,
+      cap: state.params.cap
     });
   }
 
@@ -396,8 +438,8 @@ window.Explorer = (function () {
   function isLiveSet(asset, p) {
     if (!asset.live) return false;
     var gated = isGated();
-    var keys = gated && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out"];
-    if (gated !== (asset.live.sizing === "gated") && keys.length > 3) return false;
+    var keys = gated && asset.live.sizing === "gated" ? PARAM_ORDER : ["sma", "buffer", "out", "cap"];
+    if (gated !== (asset.live.sizing === "gated") && keys.length > 4) return false;
     return keys.every(function (k) { return p[k] === asset.live.params[k]; });
   }
 
@@ -472,6 +514,106 @@ window.Explorer = (function () {
       + '</div>';
   }
 
+  // --- cost cap sweep ------------------------------------------------------
+  // The last item in "Design space": the current strategy re-run at each cost
+  // cap from 5% to 60% a year, joined point to point, against dashed lines for
+  // the same strategy with no cap. Clicking a point sets that cap, like
+  // clicking a matrix cell. Every point goes through StrategyConfig.evaluate,
+  // so it is the same number a matrix cell with that cap would show.
+  var CAP_SWEEP = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+  var rerenderMain = null;   // set by wire(); the sweep's click handler needs it
+
+  function capSweepHTML(env) {
+    var off = cellStats(env, Object.assign({}, state.params, { cap: 0 }));
+    var head = '<div class="mx-head"><strong>Cost cap sweep</strong>'
+      + '<span class="toolsrow" style="margin:0;">the current strategy at every cost cap &mdash; click a point to use it</span></div>';
+    if (off.invalid) return '<div class="matrix-card">' + head + '<div class="toolsrow">The current strategy cannot run: ' + off.invalid + '.</div></div>';
+    if (off.insufficient) return '<div class="matrix-card">' + head + '<div class="toolsrow">Not enough history in this period.</div></div>';
+
+    var pts = CAP_SWEEP.map(function (c) {
+      return { cap: c, s: cellStats(env, Object.assign({}, state.params, { cap: c })) };
+    });
+    var usable = function (s) { return s && !s.invalid && !s.insufficient && !s.ruined; };
+    var ruinedCaps = pts.filter(function (p) { return p.s.ruined; }).map(function (p) { return p.cap + "%"; });
+    var cur = state.params.cap > 0 ? state.params.cap : null;
+    var best = pts.filter(function (p) { return usable(p.s); })
+      .reduce(function (b, p) { return !b || p.s.cagr > b.s.cagr ? p : b; }, null);
+    // Where the cap stops binding: from here on every point equals "cap off".
+    var noEffect = null;
+    for (var i = pts.length - 1; i >= 0; i--) {
+      if (usable(pts[i].s) && usable(off) && Math.abs(pts[i].s.cagr - off.cagr) < 1e-9 && Math.abs(pts[i].s.maxDD - off.maxDD) < 1e-9) noEffect = pts[i].cap;
+      else break;
+    }
+
+    function hoverText(p) {
+      var s = p.s;
+      if (s.ruined) return "Cap ≤" + p.cap + "%/yr: WIPED OUT" + (s.ruinDate ? " " + s.ruinDate : "");
+      if (!usable(s)) return "Cap ≤" + p.cap + "%/yr: —";
+      return "Cap ≤" + p.cap + "%/yr<br>CAGR " + (s.cagr >= 0 ? "+" : "") + fmt(s.cagr, 1) + "% · max DD " + fmt(s.maxDD, 1) + "%"
+        + "<br>Calmar " + (s.calmar == null ? "—" : fmt(s.calmar, 2)) + " · " + fmt(s.tradesPerYear, 1) + " round trips/yr";
+    }
+
+    var slot = window.Plot.slot({
+      height: 300, key: "explorer-capsweep", legendScope: ".capsweep",
+      label: "Effect of the cost cap on the current strategy: net CAGR and maximum drawdown at each cap from 5 to 60 percent a year",
+      onClick: function (pt) {
+        var c = Number(pt.x);
+        if (!(c > 0) || !rerenderMain) return;
+        state.params.cap = c; state.capValue = c;
+        rerenderMain();
+      },
+      build: function (t) {
+        var xs = pts.map(function (p) { return p.cap; });
+        var markerSize = pts.map(function (p) { return p.cap === cur ? 12 : 7; });
+        var data = [
+          { x: xs, y: pts.map(function (p) { return usable(p.s) ? p.s.cagr : null; }), type: "scatter", mode: "lines+markers", name: "CAGR (net)",
+            line: { color: t.long, width: 2 }, marker: { color: t.long, size: markerSize, line: { color: t.card, width: 1.5 } },
+            customdata: pts.map(hoverText), hovertemplate: "%{customdata}<extra></extra>", connectgaps: false },
+          { x: xs, y: pts.map(function (p) { return usable(p.s) ? p.s.maxDD : null; }), yaxis: "y2", type: "scatter", mode: "lines+markers", name: "Max drawdown",
+            line: { color: t.warn, width: 1.5, dash: "4px,3px" }, marker: { color: t.warn, size: markerSize, symbol: "square", line: { color: t.card, width: 1.5 } },
+            hoverinfo: "skip", connectgaps: false }
+        ];
+        var shapes = [], notes = [];
+        if (usable(off)) {
+          shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: off.cagr, y1: off.cagr, line: { color: t.long, width: 1, dash: "dot" } });
+          shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y2", y0: off.maxDD, y1: off.maxDD, line: { color: t.warn, width: 1, dash: "dot" } });
+          notes.push({ text: "no cap " + (off.cagr >= 0 ? "+" : "") + fmt(off.cagr, 1) + "%", x: 1, xref: "paper", xanchor: "right", y: off.cagr, yref: "y", yanchor: "bottom", showarrow: false, font: { size: 10, color: t.long } });
+          notes.push({ text: "no cap " + fmt(off.maxDD, 1) + "%", x: 1, xref: "paper", xanchor: "right", y: off.maxDD, yref: "y2", yanchor: "top", showarrow: false, font: { size: 10, color: t.warn } });
+        }
+        if (cur) shapes.push({ type: "line", xref: "x", x0: cur, x1: cur, yref: "paper", y0: 0, y1: 1, line: { color: t.ink, width: 1, dash: "dot" } });
+        var rightAxis = window.Plot.axisStyle(t);
+        delete rightAxis.gridcolor;   // no grid on the right axis — the left one draws it
+        return {
+          data: data,
+          layout: {
+            margin: { l: 56, r: 56, t: 10, b: 40 },
+            hovermode: "closest", dragmode: false,
+            xaxis: { type: "linear", range: [2, 63], tickvals: CAP_SWEEP, ticksuffix: "%", hoverformat: ".0f",
+              title: { text: "Cost cap (max all-in cost, % a year)", font: { size: 11, color: t.inkSoft } } },
+            yaxis: Object.assign(window.Plot.axisStyle(t), { ticksuffix: "%", title: { text: "CAGR (net)", font: { size: 11, color: t.long } } }),
+            yaxis2: Object.assign(rightAxis, { overlaying: "y", side: "right", showgrid: false, ticksuffix: "%",
+              title: { text: "Max drawdown", font: { size: 11, color: t.warn } } }),
+            shapes: shapes, annotations: notes
+          }
+        };
+      }
+    });
+
+    return '<div class="matrix-card capsweep">' + head + slot
+      + '<div class="ch-legend">'
+      + '<span data-trace="0"><i class="sw-strat"></i>CAGR, net of costs (left axis)</span>'
+      + '<span data-trace="1"><i class="sw-neg"></i>Max drawdown (right axis, squares)</span>'
+      + '<span class="ch-note">dotted lines = the same strategy with no cap' + (cur ? ' &middot; vertical line = your cap, ≤' + cur + '%/yr' : '') + '</span>'
+      + '</div>'
+      + '<div class="toolsrow">'
+      + (noEffect ? 'From ≤' + noEffect + '%/yr up, the cap never binds in this period &mdash; every point equals no cap. ' : '')
+      + (best ? 'Highest CAGR here is at ≤' + best.cap + '%/yr (' + (best.s.cagr >= 0 ? "+" : "") + fmt(best.s.cagr, 1) + '%)' + (usable(off) ? ' vs ' + (off.cagr >= 0 ? "+" : "") + fmt(off.cagr, 1) + '% with no cap' : '') + ' &mdash; '
+             + 'but a jagged line means the differences are noise from a handful of high-rate years; pick a cap for a reason (what leverage you would refuse to pay for), not the peak. ' : '')
+      + (ruinedCaps.length ? 'Wiped out at ' + ruinedCaps.join(", ") + ' (left blank). ' : '')
+      + 'Same period, costs and parameters as everything above.</div>'
+      + '</div>';
+  }
+
   function summaryHTML(s, gs) {
     function tile(k, v, sub) { return '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + '</div>' + (sub ? '<div class="k" style="margin:3px 0 0;">' + sub + '</div>' : "") + '</div>'; }
     if (s.invalid) return '<div class="toolsrow">This combination cannot run: ' + s.invalid + '.</div>';
@@ -527,7 +669,10 @@ window.Explorer = (function () {
     }
 
     var ec = engineCostsFrom(costs, refRates);
-    var period = PERIODS[state.periodIdx];
+    var period = currentPeriod();
+    // The price, performance and fee charts share a zoom; it survives clicks
+    // and edits, and resets when the asset or period on screen changes.
+    window.Plot.linkKey("explorer", state.asset + "|" + SC.periodSig(period));
     var env = {
       prices: prices, asset: asset, costs: costs, ec: ec, period: period,
       stamp: asset.key + "|" + prices.length + "|" + prices[prices.length - 1].date,
@@ -551,24 +696,31 @@ window.Explorer = (function () {
       + 'Backtested on ' + asset.backtestAsset + '. Each period is compounded fresh from its own start, so RUINED means wiped out <em>inside</em> the selected window; the in/out signal still carries in from before it.</div>'
       + '<div class="matrix-stack">'
       + state.matrices.map(function (m, i) { return matrixHTML(i, m, env); }).join("")
+      + capSweepHTML(env)
       + '</div>'
       + (state.matrices.length < MAX_MATRICES ? '<button class="winbtn" data-addm="1">+ Add matrix</button>' : "")
       + '</div>';
 
     html += costsPanelHTML(costs, refRates, prices, period, gs);
 
-    var wk = walkFor(prices, asset.key, state.params.sma, state.params.buffer, gs, { out: state.params.out, high: state.params.high });
+    var wk = walkFor(prices, asset.key, state.params.sma, state.params.buffer, gs,
+      { out: state.params.out, high: state.params.high, capAt: SC.costCapFor(env, state.params.cap), capPct: state.params.cap });
     var sel = { sma: state.params.sma, buffer: state.params.buffer };
     html += window.PriceChart.render(prices, sel, state.params.high, period, wk);
     html += costBreakdownHTML(prices, wk, period, state.params.high, ec);
     html += window.PerfChart.render(prices, sel, state.params.high, period, wk, state.perfMode, state.annMode, ec);
+    html += '<div class="zoom-bar" id="exp-zoombar" hidden><span>Zoomed to <strong class="zb-range"></strong></span>'
+      + '<button class="winbtn active" data-zoom-apply="1" title="Recalculate everything on this tab — matrices, CAGR, drawdowns, costs, charts — as if the strategy started on the first day of this range">Use as the period</button>'
+      + '<span class="muted">double-click a chart to zoom out</span></div>';
 
     container.innerHTML = html;
     wire(container, data, costAssumptions, refRates);
+    window.Plot.mount(container);
   }
 
   function wire(container, data, costAssumptions, refRates) {
     function rerender() { renderMain(container, data, costAssumptions, refRates); }
+    rerenderMain = rerender;
     function bind(sel, fn) {
       container.querySelectorAll(sel).forEach(function (el) {
         el.addEventListener("click", function () { if (el.disabled) return; fn(el); rerender(); });
@@ -576,10 +728,26 @@ window.Explorer = (function () {
     }
     bind("[data-asset]", function (el) {
       state.asset = el.getAttribute("data-asset");
+      state.custom = null;   // a date range from one asset's chart means little on another's
       var a = assetConfig(state.asset);
       if (a.gate) state.params.gate = a.gate.def;    // each asset has its own vol scale
     });
-    bind("[data-period]", function (el) { state.periodIdx = Number(el.getAttribute("data-period")); });
+    bind("[data-period]", function (el) { state.periodIdx = Number(el.getAttribute("data-period")); state.custom = null; });
+    bind("[data-period-clear]", function () { state.custom = null; });
+    // A zoom on any chart offers its range as the period: the bar at the
+    // bottom of the tab appears while zoomed and is hidden again on reset.
+    var zoomBar = container.querySelector("#exp-zoombar");
+    function showZoom(range) {
+      if (!zoomBar) return;
+      zoomBar.hidden = !range;
+      if (range) zoomBar.querySelector(".zb-range").textContent = range[0] + " → " + range[1];
+    }
+    window.Plot.onRange("explorer", showZoom);
+    showZoom(window.Plot.groupRange("explorer"));
+    bind("[data-zoom-apply]", function () {
+      var r = window.Plot.groupRange("explorer");
+      if (r) state.custom = periodFromRange(r, data);
+    });
     bind("[data-sizing]", function (el) { state.sizing = el.getAttribute("data-sizing"); });
     bind("[data-grid]", function (el) { state.grid = el.getAttribute("data-grid"); });
     bind("[data-metric]", function (el) { state.metric = el.getAttribute("data-metric"); });
@@ -634,6 +802,25 @@ window.Explorer = (function () {
       });
     });
 
+    // Cost cap: the switch sets params.cap to the slider's value (or 0 = off);
+    // dragging the slider updates its label live and applies on release.
+    var capOn = container.querySelector("[data-cap-on]"), capSlider = container.querySelector("[data-cap-slider]");
+    if (capOn) capOn.addEventListener("change", function () {
+      state.params.cap = capOn.checked ? state.capValue : 0;
+      rerender();
+    });
+    if (capSlider) {
+      capSlider.addEventListener("input", function () {
+        var lbl = container.querySelector(".cap-val");
+        if (lbl) lbl.textContent = "≤" + capSlider.value + "%/yr";
+      });
+      capSlider.addEventListener("change", function () {
+        state.capValue = Number(capSlider.value);
+        if (state.params.cap > 0) state.params.cap = state.capValue;
+        rerender();
+      });
+    }
+
     // Matrix axis dropdowns. Picking the other axis's parameter swaps the two;
     // picking a vol-gate parameter switches sizing to vol-gated (you clearly want it).
     container.querySelectorAll("[data-mx]").forEach(function (el) {
@@ -668,6 +855,7 @@ window.Explorer = (function () {
         if (!m) return;
         state.params[m.x] = parseVal(m.x, cell.getAttribute("data-xv"));
         state.params[m.y] = parseVal(m.y, cell.getAttribute("data-yv"));
+        if (state.params.cap > 0) state.capValue = state.params.cap;
         rerender();
       }
       cell.addEventListener("click", pick);
