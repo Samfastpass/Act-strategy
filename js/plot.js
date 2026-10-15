@@ -76,7 +76,9 @@ window.Plot = (function () {
     return {
       height: height, autosize: true,
       margin: { l: 52, r: 14, t: 8, b: 28 },
-      paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+      // The panel's own colour rather than transparent, so a PNG export
+      // isn't light text on a transparent background.
+      paper_bgcolor: t.card, plot_bgcolor: t.card,
       font: { family: t.mono, size: 10, color: t.inkSoft },
       showlegend: false,
       hovermode: "x unified",
@@ -227,9 +229,18 @@ window.Plot = (function () {
     Promise.all(jobs).then(function () { linking = false; }, function () { linking = false; });
   }
 
-  // Draws every pending slot under `root` that is in the page and visible.
+  // Draws every pending slot under `root` that is in the page and visible, and
+  // re-measures plots already drawn there: one drawn on a tab that was then
+  // hidden keeps its old width through a window resize or phone rotation
+  // (Plotly can't measure a display:none element), and so does one redrawn
+  // for a light/dark switch while hidden.
   function mount(root) {
     root = root || document;
+    if (loadState === "ready") {
+      mounted.forEach(function (m) {
+        if (root.contains(m.div) && visible(m.div)) { try { window.Plotly.Plots.resize(m.div); } catch (e) { /* purged */ } }
+      });
+    }
     Object.keys(pending).forEach(function (id) { if (!document.getElementById(id)) delete pending[id]; });
     var ids = Object.keys(pending).filter(function (id) {
       var el = document.getElementById(id);
