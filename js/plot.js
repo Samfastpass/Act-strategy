@@ -157,6 +157,17 @@ window.Plot = (function () {
     if (g.key !== key) { g.key = key; g.range = null; }
   }
 
+  // The zoomed x range of a group as [fromDate, toDate] (YYYY-MM-DD), or null
+  // when not zoomed — e.g. for an "use this range as the period" button.
+  // onRange(group, fn) calls fn(range) after every zoom or reset in the group.
+  var rangeListeners = {};
+  function groupRange(group) {
+    var g = groups[group];
+    if (!g || !g.range) return null;
+    return [String(g.range[0]).slice(0, 10), String(g.range[1]).slice(0, 10)];
+  }
+  function onRange(group, fn) { rangeListeners[group] = fn; }
+
   function visible(el) { return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length); }
 
   // Plots whose div has left the page, by spec.key. A fresh Plotly.newPlot
@@ -223,6 +234,7 @@ window.Plot = (function () {
     else if (ev["xaxis.autorange"]) reset = true;
     if (!range && !reset) return;
     groups[group].range = range;
+    if (rangeListeners[group]) rangeListeners[group](groupRange(group));
     linking = true;
     var jobs = mounted.filter(function (m) { return m.spec.group === group && m.div !== src && document.body.contains(m.div); })
       .map(function (m) { return window.Plotly.relayout(m.div, reset ? { "xaxis.autorange": true } : { "xaxis.range": range.slice(), "xaxis.autorange": false }); });
@@ -343,6 +355,7 @@ window.Plot = (function () {
     slot: slot, mount: mount, linkKey: linkKey, wireLegend: wireLegend,
     decimate: decimate, steps: steps, rangeButtons: rangeButtons, axisStyle: axisStyle, logAxis: logAxis,
     // For dev checks only: build every figure on screen without drawing it.
+    groupRange: groupRange, onRange: onRange,
     _figures: function () { return mounted.map(function (m) { return figure(m.spec); }); },
     _pendingFigure: function (id) { return pending[id] ? figure(pending[id]) : null; }
   };

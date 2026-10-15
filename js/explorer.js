@@ -50,6 +50,9 @@ window.Explorer = (function () {
   // The single current strategy. Defaults to the live S&P strategy.
   var state = {
     asset: "SP500", periodIdx: 0, grid: "broad", metric: "calmar",
+    // A period taken from a chart zoom ({ from, to }, to exclusive) — overrides
+    // periodIdx until cleared or another period/asset is picked.
+    custom: null,
     sizing: "gated",
     params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true },
     matrices: [{ x: "buffer", y: "sma" }, { x: "low", y: "high" }],
@@ -63,6 +66,28 @@ window.Explorer = (function () {
   function assetConfig(key) { return SC.assetConfig(key); }
 
   // This tab's current strategy as a StrategyConfig descriptor.
+  function currentPeriod() {
+    if (!state.custom) return PERIODS[state.periodIdx];
+    return { label: customLabel(state.custom), from: state.custom.from, to: state.custom.to };
+  }
+  function shiftDay(d, n) {
+    var t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n);
+    return t.toISOString().slice(0, 10);
+  }
+  // Period `to` is exclusive; the label shows the last day included.
+  function customLabel(c) { return (c.from || "start") + " → " + (c.to ? shiftDay(c.to, -1) : "today"); }
+  // A zoomed chart range [from, to] (inclusive dates) -> a period. A range
+  // reaching past the last price stays open-ended, so new days still count.
+  function periodFromRange(r, data) {
+    var prices = data[window.App.assetKey(assetConfig(state.asset).backtestAsset)] || [];
+    var last = prices.length ? prices[prices.length - 1].date : null;
+    var first = prices.length ? prices[0].date : null;
+    return {
+      from: first && r[0] <= first ? null : r[0],
+      to: last && r[1] >= last ? null : shiftDay(r[1], 1)
+    };
+  }
+
   function curCfg(params) { return { asset: state.asset, sizing: state.sizing, params: params || state.params }; }
 
   var MAX_MATRICES = 3;
@@ -172,8 +197,10 @@ window.Explorer = (function () {
       + '</div></div>'
       + '<div class="exp-ctl"><label>Period</label><div class="winbtns">'
       + btnRow(PERIODS.map(function (p, i) { return { label: p.label, i: i }; }),
-               function (it) { return it.i === state.periodIdx; },
+               function (it) { return !state.custom && it.i === state.periodIdx; },
                function (it) { return 'data-period="' + it.i + '"'; })
+      + (state.custom ? '<button class="winbtn active" data-period-clear="1" title="Back to ' + PERIODS[state.periodIdx].label + '">'
+          + customLabel(state.custom) + ' &times;</button>' : '')
       + '</div></div>'
       + '<div class="exp-ctl"><label>Grid</label><div class="winbtns">'
       + btnRow([{ label: "Broad", g: "broad" }, { label: "Zoomed", g: "zoom" }],
@@ -527,7 +554,7 @@ window.Explorer = (function () {
     }
 
     var ec = engineCostsFrom(costs, refRates);
-    var period = PERIODS[state.periodIdx];
+    var period = currentPeriod();
     // The price, performance and fee charts share a zoom; it survives clicks
     // and edits, and resets when the asset or period on screen changes.
     window.Plot.linkKey("explorer", state.asset + "|" + SC.periodSig(period));
@@ -565,6 +592,9 @@ window.Explorer = (function () {
     html += window.PriceChart.render(prices, sel, state.params.high, period, wk);
     html += costBreakdownHTML(prices, wk, period, state.params.high, ec);
     html += window.PerfChart.render(prices, sel, state.params.high, period, wk, state.perfMode, state.annMode, ec);
+    html += '<div class="zoom-bar" id="exp-zoombar" hidden><span>Zoomed to <strong class="zb-range"></strong></span>'
+      + '<button class="winbtn active" data-zoom-apply="1" title="Recalculate everything on this tab — matrices, CAGR, drawdowns, costs, charts — as if the strategy started on the first day of this range">Use as the period</button>'
+      + '<span class="muted">double-click a chart to zoom out</span></div>';
 
     container.innerHTML = html;
     wire(container, data, costAssumptions, refRates);
@@ -580,10 +610,26 @@ window.Explorer = (function () {
     }
     bind("[data-asset]", function (el) {
       state.asset = el.getAttribute("data-asset");
+      state.custom = null;   // a date range from one asset's chart means little on another's
       var a = assetConfig(state.asset);
       if (a.gate) state.params.gate = a.gate.def;    // each asset has its own vol scale
     });
-    bind("[data-period]", function (el) { state.periodIdx = Number(el.getAttribute("data-period")); });
+    bind("[data-period]", function (el) { state.periodIdx = Number(el.getAttribute("data-period")); state.custom = null; });
+    bind("[data-period-clear]", function () { state.custom = null; });
+    // A zoom on any chart offers its range as the period: the bar at the
+    // bottom of the tab appears while zoomed and is hidden again on reset.
+    var zoomBar = container.querySelector("#exp-zoombar");
+    function showZoom(range) {
+      if (!zoomBar) return;
+      zoomBar.hidden = !range;
+      if (range) zoomBar.querySelector(".zb-range").textContent = range[0] + " → " + range[1];
+    }
+    window.Plot.onRange("explorer", showZoom);
+    showZoom(window.Plot.groupRange("explorer"));
+    bind("[data-zoom-apply]", function () {
+      var r = window.Plot.groupRange("explorer");
+      if (r) state.custom = periodFromRange(r, data);
+    });
     bind("[data-sizing]", function (el) { state.sizing = el.getAttribute("data-sizing"); });
     bind("[data-grid]", function (el) { state.grid = el.getAttribute("data-grid"); });
     bind("[data-metric]", function (el) { state.metric = el.getAttribute("data-metric"); });

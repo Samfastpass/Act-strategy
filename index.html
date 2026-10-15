@@ -112,6 +112,13 @@
   .ch-legend .lg-toggle { cursor: pointer; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
   .ch-legend .lg-toggle:hover, .ch-legend .lg-toggle:focus-visible { background: var(--line); outline: none; }
   .ch-legend .lg-off { opacity: 0.4; text-decoration: line-through; }
+  /* Offered after a chart zoom: pinned to the bottom of the screen while the
+     Explorer is in view, so it's reachable from any of its charts. */
+  .zoom-bar { position: sticky; bottom: 12px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    margin: 0 auto 14px; padding: 10px 14px; max-width: 640px; border: 1px solid var(--ink-faint); border-radius: 10px;
+    background: var(--card); box-shadow: 0 4px 18px rgba(0,0,0,0.25); font-size: 12px; color: var(--ink-soft); }
+  .zoom-bar[hidden] { display: none; }
+  .zoom-bar strong { font-family: var(--mono); color: var(--ink); }
 
   /* Four CAGR figures don't fit across a phone-width card — wrap to 2x2. */
   @media (max-width: 460px) {
