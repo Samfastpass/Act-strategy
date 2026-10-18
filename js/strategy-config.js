@@ -20,7 +20,7 @@ window.StrategyConfig = (function () {
   // leveraged product, so there is nothing to gate.
   var ASSETS = [
     { key: "SP500", label: "S&P 500", backtestAsset: "SPX_MERGED",
-      live: { sizing: "gated", params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 0 } },
+      live: { sizing: "gated", params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 20 } },
       gate: { options: [16, 18, 20, 22, 25, 30], def: 22 } },
     { key: "BTC", label: "Bitcoin", backtestAsset: "BTC", live: null, gate: null },
     { key: "GOLD", label: "Gold", backtestAsset: "GOLD", live: null, gate: { options: [10, 12, 15, 18, 22], def: 15 } },
