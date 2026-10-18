@@ -54,10 +54,10 @@ window.Explorer = (function () {
     // periodIdx until cleared or another period/asset is picked.
     custom: null,
     sizing: "gated",
-    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 0 },
+    params: { sma: 200, buffer: 3, high: 5, low: 3, out: 0, volwin: 20, gate: 22, latch: true, cap: 20 },
     // The cost-cap slider's value, remembered while the switch is off
     // (params.cap is 0 then — off — so the matrices see it as off).
-    capValue: SC.CAP_SLIDER.def,
+    capValue: 20,
     matrices: [{ x: "buffer", y: "sma" }, { x: "low", y: "high" }],
     perfMode: "total", annMode: "calendar"
   };

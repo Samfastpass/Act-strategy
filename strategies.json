@@ -32,7 +32,8 @@
     "volGate": 0.22,
     "annualization": 252,
     "leverage": { "base": 5, "gated": 3 },
-    "meterRange": { "min": -6, "max": 14 }
+    "meterRange": { "min": -6, "max": 14 },
+    "costCap": 20
   },
   {
     "id": "btc-sma40",

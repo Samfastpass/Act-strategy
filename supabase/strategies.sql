@@ -33,6 +33,6 @@ create policy "strategies anon delete" on public.strategies for delete to anon u
 
 insert into public.strategies (id, position, on_home, def) values
   ('btc-sma120-voltarget', 0, true, '{"name": "Bitcoin", "liveAsset": "BTC", "backtestAsset": "BTC", "smaLen": 120, "buffer": 0, "volLen": 20, "volGate": null, "annualization": 365, "sizing": {"mode": "volTarget", "volTarget": 0.6, "maxSize": 1.0, "rebalanceBand": 0.15}, "leverage": {"base": 1, "gated": null}, "meterRange": {"min": -6, "max": 22}, "execution": "Signal from BTC 24/7 close; execute next LSE session. WXBT (WisdomTree Physical Bitcoin ETP, 0.15% TER) on Trading 212 Invest."}'::jsonb),
-  ('spy-sma200-volgate', 1, true, '{"name": "S&P 500", "liveAsset": "SPY", "backtestAsset": "SPX_MERGED", "smaLen": 200, "buffer": 0.03, "volLen": 20, "volGate": 0.22, "annualization": 252, "leverage": {"base": 5, "gated": 3}, "meterRange": {"min": -6, "max": 14}}'::jsonb),
+  ('spy-sma200-volgate', 1, true, '{"name": "S&P 500", "liveAsset": "SPY", "backtestAsset": "SPX_MERGED", "smaLen": 200, "buffer": 0.03, "volLen": 20, "volGate": 0.22, "annualization": 252, "leverage": {"base": 5, "gated": 3}, "meterRange": {"min": -6, "max": 14}, "costCap": 20}'::jsonb),
   ('btc-sma40', 2, false, '{"name": "Bitcoin (40d)", "archived": true, "liveAsset": "BTC", "backtestAsset": "BTC", "smaLen": 40, "buffer": 0, "volLen": null, "volGate": null, "annualization": 365, "leverage": {"base": 1, "gated": null}, "meterRange": {"min": -6, "max": 22}}'::jsonb)
 on conflict (id) do nothing;

@@ -640,6 +640,15 @@ the live strategy, all history:
 | 25%/yr | 19.8% | −85.2% |
 | 10%/yr | 16.4% | −73.5% |
 
+**Adopted on the live S&P strategy at 20%/yr (2026-10-19)** — the `costCap: 20`
+field on `spy-sma200-volgate` (Supabase row, `strategies.json` seed, and the
+Explorer's live preset). Net, all history: 18.6% → 19.9% CAGR, max drawdown
+−88.8% → −85.2%; 1970–85 4.9% → 10.9%/yr; 2001–2026 20.6% → 20.2%. At the
+3.88% Fed Funds of Oct 2026, 5× costs ~25.2%/yr, so the cap holds **3× today**.
+Chosen as a stated limit ("don't pay over ~20%/yr to borrow"), not as the peak
+of the sweep — 15% scored higher on 2001–2026, 20% on all history, and the
+line between them is noise.
+
 Caveats, not to relitigate away: Fed Funds above ~10% happened in only two
 episodes in this data (1973–74, 1979–85), so this can't be validated
 statistically, and the results are not monotonic in the cap (don't tune it).
