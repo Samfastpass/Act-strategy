@@ -589,6 +589,31 @@ later recover. This fires for no live strategy (their worst-ever daily
 factor is 0.601), so it changed no existing number; it exists because the
 explorer's high-leverage sweeps hit it constantly.
 
+## Keeping costs current (added 2026-10-18)
+Costs have two inputs with very different lifetimes:
+- **Rates** (`reference-rates.json`: Fed Funds, SONIA, S&P dividend yield) move
+  whenever a central bank does. They were refreshed by hand only, and went
+  stale: the file was built on 2026-09-20, three days after the Fed's
+  17 Sept hike (target 3.50–3.75% → 3.75–4.00%, effective 3.63% → 3.88%), so
+  the site kept assuming 3.64%. At 5× that understated the all-in cost by
+  ~1%/yr (24.3% vs 25.2%) and let a 25% cost cap hold 5× when it should hold 3×.
+  Now: a GitHub Action rebuilds the file on the 3rd of each month and
+  commits it; it asks Pages to rebuild explicitly, because a push made with
+  `GITHUB_TOKEN` doesn't trigger other workflows (Pages' build included).
+  FRED often times out, so Fed Funds falls back to the New York Fed's EFFR
+  API for recent months, with weekends/holidays carrying the last rate as
+  DFF does — checked to reproduce FRED's monthly means exactly (Jun–Oct 2026,
+  including September's mid-month hike). Each series records
+  `lastObservation`/`latestDaily`; the site uses `latestDaily` as "the rate
+  now" (fee headline, cost line).
+- **Product terms** (`cost-assumptions.json`, from the issuers' Final Terms)
+  change only if the issuer changes them. Each product's `source.fetched` is
+  the date its terms were last checked — update it when you re-check, even if
+  nothing changed.
+- **Staleness is shown, not hidden**: the Explorer's Costs panel always says
+  how old both are, and turns it into a warning past 45 days (rates) / 365
+  days (terms); the Developed tab shows the warning when anything is overdue.
+
 ## Cost cap (added 2026-10-15)
 An optional strategy parameter, `cap` (%/yr, 0 = off, the default): never hold
 more leverage than would cost that much a year all-in (fees + financing at

@@ -18,7 +18,10 @@ dependencies beyond a CDN-loaded `@supabase/supabase-js` and Plotly (the
 - **Deploy**: push to the branch GitHub Pages serves from — there is no
   separate build/publish step.
 - **`tools/`** (dev only, need numpy + internet): `build_reference_data.py`
-  regenerates `reference-rates.json`; `check_leveraged_products.py` re-tests
+  regenerates `reference-rates.json` (stdlib only; run monthly by
+  `.github/workflows/refresh-reference-rates.yml`, which commits the result and
+  requests a Pages build — Fed Funds falls back to the NY Fed's EFFR API when
+  FRED times out, and a failed source keeps its previous series); `check_leveraged_products.py` re-tests
   the cost formula against real leveraged-product prices;
   `check_js_vs_python.py` (also needs Node) runs the site's real JS engine
   and `strategy_lib.py` on 44 configurations of 98 years of S&P data and

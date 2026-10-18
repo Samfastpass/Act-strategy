@@ -241,8 +241,11 @@ window.StrategyConfig = (function () {
   // Looks a month's value up in a series from reference-rates.json
   // ([ ["YYYY-MM", value], ... ]), holding the first/last value outside the
   // covered range. Returns { fn, loaded, earliest, latest, latestValue }.
+  // Also returns the newest daily figure and its date (lastObservation /
+  // latestDaily, written by tools/build_reference_data.py) — "the rate now".
   function refSeriesFn(refRates, name) {
-    var ser = refRates && refRates[name] && refRates[name].series;
+    var meta = (refRates && refRates[name]) || {};
+    var ser = meta.series;
     if (!ser || !ser.length) return { fn: function () { return 0; }, loaded: false };
     var byMonth = {};
     ser.forEach(function (r) { byMonth[r[0]] = r[1]; });
@@ -252,6 +255,9 @@ window.StrategyConfig = (function () {
     var lastKey = null, lastVal = 0;
     return {
       loaded: true, earliest: ser[0][0], latest: ser[ser.length - 1][0], latestValue: last,
+      lastObservation: meta.lastObservation || null,
+      nowValue: meta.latestDaily != null ? meta.latestDaily : last,
+      nowDate: meta.lastObservation || ser[ser.length - 1][0],
       fn: function (dateStr) {
         var key = dateStr.slice(0, 7);
         if (key === lastKey) return lastVal;
@@ -261,6 +267,35 @@ window.StrategyConfig = (function () {
         return v;
       }
     };
+  }
+
+  // How current the cost inputs are. Rates go stale when the monthly refresh
+  // (.github/workflows/refresh-reference-rates.yml) stops running; product
+  // terms when nobody has re-checked the issuer's documents for a year.
+  // Dates are a series' lastObservation (or its latest month) and each
+  // product's source.fetched — when its terms were last taken from the source.
+  var RATES_STALE_DAYS = 45, TERMS_STALE_DAYS = 365;
+  function daysSince(dateStr, today) {
+    if (!dateStr) return null;
+    var d = dateStr.length === 7 ? dateStr + "-28" : dateStr;   // a bare month counts from its end
+    return Math.floor(((today || new Date()) - new Date(d + "T00:00:00Z")) / 864e5);
+  }
+  function freshness(refRates, cfg, today) {
+    var out = { rate: null, terms: null };
+    var names = [cfg.financingRateAsset, cfg.dividends && cfg.dividends.series].filter(Boolean);
+    names.forEach(function (n) {
+      var r = refSeriesFn(refRates, n);
+      if (!r.loaded) return;
+      var days = daysSince(r.nowDate, today);
+      if (!out.rate || days > out.rate.days) out.rate = { name: n, date: r.nowDate, days: days, value: r.nowValue, stale: days > RATES_STALE_DAYS };
+    });
+    (cfg.products || []).forEach(function (p) {
+      var f = p.source && p.source.fetched;
+      if (!f) return;
+      var days = daysSince(f, today);
+      if (!out.terms || days > out.terms.days) out.terms = { name: p.name, date: f, days: days, stale: days > TERMS_STALE_DAYS };
+    });
+    return out;
   }
 
   // The plain object compoundEquity takes. Products carry funding spread +
@@ -438,7 +473,8 @@ window.StrategyConfig = (function () {
     normalize: normalize, describe: describe, gateLabel: gateLabel,
     walkFor: walkFor, periodBounds: periodBounds, windowStats: windowStats,
     evaluate: evaluate, benchmark: benchmark, periodSig: periodSig,
-    costConfigFor: costConfigFor, refSeriesFn: refSeriesFn, engineCostsFrom: engineCostsFrom, costVariant: costVariant,
+    costConfigFor: costConfigFor, refSeriesFn: refSeriesFn, freshness: freshness,
+    RATES_STALE_DAYS: RATES_STALE_DAYS, TERMS_STALE_DAYS: TERMS_STALE_DAYS, engineCostsFrom: engineCostsFrom, costVariant: costVariant,
     saved: saved, save: save, remove: remove, rename: rename, reorder: reorder
   };
 })();
