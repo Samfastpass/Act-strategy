@@ -305,7 +305,7 @@ window.Explorer = (function () {
       primary: { exposure: L, product: engineOf(prod) },
       secondary: gs.enabled ? { exposure: gs.low, product: engineOf(lowProd) } : null,
       rateFn: cfg.financingRateAsset ? rate.fn : null, rateName: cfg.financingRateAsset,
-      rateNow: rate.loaded ? rate.latestValue : 0, rateNowMonth: rate.latest,
+      rateNow: rate.loaded ? rate.nowValue : 0, rateNowMonth: rate.nowDate,
       rateEarliest: rate.loaded ? rate.earliest : null,
       divFn: divFn, from: from, to: to,
       productName: prod.name, quotedCharge: prod.mgmtFeePct + prod.dailySwapRatePct * 360,
@@ -313,11 +313,30 @@ window.Explorer = (function () {
     });
   }
 
+  // How current the cost inputs are: always shown, a warning once overdue.
+  function freshnessHTML(cfg, refRates) {
+    var f = SC.freshness(refRates, cfg);
+    function ago(d) { return d === 0 ? "today" : d === 1 ? "1 day ago" : d + " days ago"; }
+    var bits = [], warn = [];
+    if (f.rate) {
+      bits.push((f.rate.name === cfg.financingRateAsset ? f.rate.name + " " + fmt(f.rate.value, 2) + "%" : "Rates") + " as of " + f.rate.date + " (" + ago(f.rate.days) + ")");
+      if (f.rate.stale) warn.push("<strong>Interest rates are " + f.rate.days + " days old</strong> &mdash; the monthly refresh may have stopped. Costs (and any cost cap) assume rates haven&#8217;t changed since " + f.rate.date
+        + ". Re-run the <em>Refresh reference rates</em> GitHub Action, or <code>python tools/build_reference_data.py</code>.");
+    }
+    if (f.terms) {
+      bits.push("product terms checked " + f.terms.date + " (" + ago(f.terms.days) + ")");
+      if (f.terms.stale) warn.push("<strong>Product terms were last checked " + f.terms.date + "</strong> (over a year ago). Check the issuer&#8217;s Final Terms for fee or spread changes, update <code>cost-assumptions.json</code>, and set each product&#8217;s <code>source.fetched</code> to the date you checked.");
+    }
+    if (!bits.length) return "";
+    return '<div class="toolsrow fresh-line">' + bits.join(" &middot; ") + '</div>'
+      + warn.map(function (w) { return '<div class="fresh-warn">' + w + '</div>'; }).join("");
+  }
+
   function costsPanelHTML(cfg, refRates, prices, period, gs) {
     var L = state.params.high;
     var prod = window.CostModel.pickProduct(cfg.products, L);
     var rate = refSeriesFn(refRates, cfg.financingRateAsset);
-    var rateNow = cfg.financingRateAsset && rate.loaded ? rate.latestValue : 0;
+    var rateNow = cfg.financingRateAsset && rate.loaded ? rate.nowValue : 0;
     var div = cfg.dividends || {};
     var divSeries = div.series ? refSeriesFn(refRates, div.series) : null;
     var divNow = divSeries ? divSeries.latestValue : (div.constantPct || 0);
@@ -339,7 +358,7 @@ window.Explorer = (function () {
     }).join("");
 
     var costLine = borrowed > 0
-      ? 'At <strong>' + L + '×</strong>, with ' + cfg.financingRateAsset + ' at ' + fmt(rateNow, 2) + '% (' + (rate.latest || "latest month") + '): fees <strong>' + fmt(drag.chargesPct, 2) + '%</strong> + financing '
+      ? 'At <strong>' + L + '×</strong>, with ' + cfg.financingRateAsset + ' at ' + fmt(rateNow, 2) + '% (' + (rate.nowDate || "latest") + '): fees <strong>' + fmt(drag.chargesPct, 2) + '%</strong> + financing '
         + fmt(borrowed, 0) + ' borrowed × (' + fmt(rateNow, 2) + '% + ' + fmt(prod.fundingSpreadPct + prod.basisPct, 2) + '% spread) = <strong>' + fmt(drag.financingPct, 2) + '%</strong>'
         + ' → <strong>' + fmt(drag.totalPct, 2) + '% a year</strong> while invested.'
         + (divNow ? ' The underlying’s ' + fmt(divNow, 2) + '% dividend yield × ' + L + ' = ' + fmt(divNow * L, 1) + '% flows back to you, so the net carry is ' + fmt(divNow * L - drag.totalPct, 1) + '% a year before price moves.' : '')
@@ -375,6 +394,7 @@ window.Explorer = (function () {
 
     return '<div class="panel">'
       + '<h2>Costs — ' + assetConfig(state.asset).label + '</h2>'
+      + freshnessHTML(cfg, refRates)
       + feeBoxHTML(cfg, refRates, prices, period, gs)
       + '<div class="toolsrow"><strong>Product held at ' + L + '×:</strong> ' + (prod.source && prod.source.url ? '<a href="' + prod.source.url + '" target="_blank" rel="noopener">' + prod.name + '</a>' : prod.name) + viaNote + '</div>'
       + '<div class="cost-grid">'

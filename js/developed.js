@@ -79,6 +79,24 @@ window.Developed = (function () {
     };
   }
 
+  // Net CAGRs and any cost cap depend on the cost inputs being current; say so
+  // (once, for every asset on the tab) when the rates or product terms are overdue.
+  function staleNoteHTML(strategies, costAssumptions, refRates) {
+    if (!costAssumptions || !refRates) return "";
+    var SC = window.StrategyConfig, msgs = {};
+    strategies.forEach(function (s) {
+      var key = window.StrategyStore.costKeyFor(s);
+      if (!key) return;
+      var f = SC.freshness(refRates, SC.costConfigFor(costAssumptions, key));
+      if (f.rate && f.rate.stale) msgs["r" + f.rate.name] = f.rate.name + " was last updated " + f.rate.date + " (" + f.rate.days + " days ago)";
+      if (f.terms && f.terms.stale) msgs["t" + key] = key + " product terms were last checked " + f.terms.date;
+    });
+    var list = Object.keys(msgs).map(function (k) { return msgs[k]; });
+    if (!list.length) return "";
+    return '<div class="fresh-warn"><strong>Cost inputs are out of date:</strong> ' + list.join("; ")
+      + '. Net returns and cost-cap positions assume nothing has changed since. See the Costs panel on the Strategy Explorer.</div>';
+  }
+
   function actionsHTML(s) {
     var ro = window.StrategyStore.isReadOnly();
     var dis = ro ? ' disabled title="Run supabase/strategies.sql in Supabase to enable"' : '';
@@ -142,7 +160,7 @@ window.Developed = (function () {
 
     var selected = analyses.filter(function (a) { return !a.missing && a.strategy.id === selectedId; })[0];
 
-    container.innerHTML = window.StrategyStore.setupNoteHTML()
+    container.innerHTML = window.StrategyStore.setupNoteHTML() + staleNoteHTML(strategies, costAssumptions, refRates)
       + (strategies.length ? '<div class="grid2">' + cardsHtml + '</div>'
          : '<div class="panel"><div class="toolsrow" style="margin-top:0;">No strategies yet. Build one on the <strong>Strategy Explorer</strong> and press <strong>Add to Developed</strong>, or add a saved one from the <strong>Evaluator</strong>.</div></div>')
       + (selected ? detailPanel(selected) : "")
